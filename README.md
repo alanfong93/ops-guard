@@ -6,7 +6,7 @@ Cited answers from your runbooks. A two-step approval gate before anything destr
 
 Works with any MCP-speaking host: Claude Code, OpenClaw, Hermes Agent, and anything else that adopts the protocol.
 
-**Status: design stage. Nothing is built yet.**
+**Status: project definition complete. Nothing is built yet.**
 
 ---
 
@@ -107,10 +107,10 @@ flowchart TD
     style EF fill:#bbf7d0,stroke:#166534,color:#000
 ```
 
-**Design decisions from the 2026-09-19 session** (Python + FastMCP; judge in v1):
+**Design decisions from the 2026-09-19 project-definition session** (Python + FastMCP; judge included in the current design):
 
 1. **Fixes come in two kinds.** A fix that maps to an *allowlisted, human-verified script* auto-executes (always logged) — the model generates nothing, it invokes a known procedure. A *model-composed* fix requires human approval before execution.
-2. **The judge is advisory in v1.** It labels every proposal with a risk class and confidence; those labels are logged but never veto a standing human decision. The audit trail of label-vs-decision is the evidence that would justify auto-execution of low-risk novel fixes later.
+2. **The judge is advisory in the current design.** It labels every proposal with a risk class and confidence; those labels are logged but never veto a standing human decision. The audit trail of label-vs-decision is evidence for any later decision about low-risk novel fixes.
 3. **The allowlist anchors to the script itself** (exact path/content), not to the model's description of it — a model cannot get arbitrary commands through by naming them "update n8n".
  4. **Agent-agnostic server; OpenCode is the first host** (dogfooded daily). OpenClaw/Hermes compatibility is free via MCP.
 
@@ -118,10 +118,10 @@ flowchart TD
 
  5. **An allowlisted script authorizes the *invocation*, not just the content.** The allowlist binds action, target, arguments, and preconditions — verified content run at the wrong moment or with wrong arguments is still a failure.
  6. **Approval cannot be agent-supplied.** Human approval arrives through a separate channel, bound to the frozen proposal; tokens are consumed atomically. The proposing agent can never manufacture the permission the gate exists to require.
- 7. **Model consensus escalates; it never clears.** Reviewer models may force human review (veto-side only). Only a standing rule the operator wrote, or a click the operator made, authorizes execution. A multi-model review tier (tribunal-as-triage) is a v2 addition once audit agreement data exists.
- 8. **Judge semantics get an explicit decision table at design stage** — "advisory" and "judge down → needs-review" currently imply different authority; the table fixes which label/failure states interrupt auto-execution, which never block a human, and which block execution outright (failed audit persistence always blocks).
+ 7. **Model consensus escalates; it never clears.** Reviewer models may force human review (veto-side only). Only a standing rule the operator wrote, or a click the operator made, authorizes execution. Whether and when tribunal-as-triage belongs is left for stage-loop to determine from audit agreement data.
+ 8. **Judge semantics get an explicit decision table in the project definition** — "advisory" and "judge down → needs-review" currently imply different authority; the table fixes which label/failure states interrupt auto-execution, which never block a human, and which block execution outright (failed audit persistence always blocks).
 
-Also recorded for the build phases: a durable execution state machine (`proposed → authorized → started → succeeded/failed/outcome-unknown`), BM25 alongside the naive keyword baseline, four separated evidence layers in the eval (retrieval / judgment / authorization / execution), and public example runbooks that stay executable — placeholders only in machine-specific config.
+Also recorded for stage-loop to assess: a durable execution state machine (`proposed → authorized → started → succeeded/failed/outcome-unknown`), BM25 alongside the naive keyword baseline, four separated evidence layers in the eval (retrieval / judgment / authorization / execution), and public example runbooks that stay executable — placeholders only in machine-specific config.
 
 ## Why MCP rather than a plugin
 

@@ -1,6 +1,6 @@
 # Who
 
-Alan, driving an AI agent — JoJo/OpenCode today, any MCP-speaking agent (OpenClaw, Hermes) tomorrow — against his self-hosted production systems.
+Alan, driving an AI agent — OpenCode today, any MCP-speaking agent (OpenClaw, Hermes) tomorrow — against his self-hosted production systems.
 
 # Must be able to
 

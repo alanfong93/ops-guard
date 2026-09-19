@@ -59,7 +59,7 @@ The agent has no direct line to the systems it operates — no shell shortcut. E
 
 ```mermaid
 flowchart TD
-    ALAN["Alan"] -->|'update n8n'| AGENT{{"Agent<br>JoJo · OpenCode · OpenClaw · Hermes"}}
+    ALAN["Alan"] -->|'update n8n'| AGENT{{"Agent<br>OpenCode · OpenClaw · Hermes · any MCP host"}}
 
     subgraph OPSGUARD["ops-guard MCP server — the only path to production"]
         direction TB
@@ -112,7 +112,7 @@ flowchart TD
 1. **Fixes come in two kinds.** A fix that maps to an *allowlisted, human-verified script* auto-executes (always logged) — the model generates nothing, it invokes a known procedure. A *model-composed* fix requires human approval before execution.
 2. **The judge is advisory in v1.** It labels every proposal with a risk class and confidence; those labels are logged but never veto a standing human decision. The audit trail of label-vs-decision is the evidence that would justify auto-execution of low-risk novel fixes later.
 3. **The allowlist anchors to the script itself** (exact path/content), not to the model's description of it — a model cannot get arbitrary commands through by naming them "update n8n".
-4. **Agent-agnostic server; JoJo/OpenCode is the first host** (dogfooding). OpenClaw/Hermes compatibility is free via MCP.
+ 4. **Agent-agnostic server; OpenCode is the first host** (dogfooded daily). OpenClaw/Hermes compatibility is free via MCP.
 
 ## Why MCP rather than a plugin
 

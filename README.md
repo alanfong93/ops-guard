@@ -53,6 +53,67 @@ Not an MCP tool. A test suite in this repo: a fixed question set with known-corr
 
 **The MCP server is the product. The eval harness is the evidence.** A safety claim with no number behind it is decoration.
 
+## How it sits between the agent and production
+
+The agent has no direct line to the systems it operates — no shell shortcut. Every operation passes through the gate, whatever agent is driving.
+
+```mermaid
+flowchart TD
+    ALAN["Alan"] -->|'update n8n'| AGENT{{"Agent<br>JoJo · OpenCode · OpenClaw · Hermes"}}
+
+    subgraph OPSGUARD["ops-guard MCP server — the only path to production"]
+        direction TB
+        SR["search_runbook(question)<br>→ answer + source passage"]
+        RB[("runbooks/<br>verified procedures only")]
+        PF["propose_fix(problem)<br>→ plan + one-time token<br>changes NOTHING")]
+        JD{"Judge<br>local LLM via Ollama<br>risk class + confidence"}
+        GATE{"Gate check"}
+        AL[("allowlist<br>verified script paths")]
+        AUD[("append-only audit log")]
+    end
+
+    subgraph PROD["Production systems"]
+        SYS1[n8n]
+        SYS2[OpenWebUI / Ollama]
+        SYS3[Docker / backups]
+    end
+
+    AGENT -->|1. asks| SR
+    RB --- SR
+    SR -->|2. cited steps| AGENT
+    AGENT -->|3. 'do it'| PF
+    PF -->|4. label this| JD
+    JD -->|5. safe / review / critical| GATE
+    AL --- GATE
+
+    GATE -->|allowlisted script<br>auto-runs, always logged| EF["execute_fix(token)"]
+    GATE -->|model-composed fix<br>needs approval| ALAN
+    ALAN -->|approve| EF
+    ALAN -->|deny| NO["refused — nothing ran"]
+
+    EF -->|6. the only door| SYS1
+    EF --> SYS2
+    EF --> SYS3
+
+    SR -.->|every call| AUD
+    PF -.-> AUD
+    EF -.->|asked · returned · executed · who approved| AUD
+
+    style ALAN fill:#fef3c7,stroke:#92400e,color:#000
+    style AGENT fill:#dbeafe,stroke:#1e40af,color:#000
+    style OPSGUARD fill:#dcfce7,stroke:#166534,color:#000
+    style PROD fill:#fee2e2,stroke:#991b1b,color:#000
+    style NO fill:#fecaca,stroke:#991b1b,color:#000
+    style EF fill:#bbf7d0,stroke:#166534,color:#000
+```
+
+**Design decisions from the 2026-09-19 session** (Python + FastMCP; judge in v1):
+
+1. **Fixes come in two kinds.** A fix that maps to an *allowlisted, human-verified script* auto-executes (always logged) — the model generates nothing, it invokes a known procedure. A *model-composed* fix requires human approval before execution.
+2. **The judge is advisory in v1.** It labels every proposal with a risk class and confidence; those labels are logged but never veto a standing human decision. The audit trail of label-vs-decision is the evidence that would justify auto-execution of low-risk novel fixes later.
+3. **The allowlist anchors to the script itself** (exact path/content), not to the model's description of it — a model cannot get arbitrary commands through by naming them "update n8n".
+4. **Agent-agnostic server; JoJo/OpenCode is the first host** (dogfooding). OpenClaw/Hermes compatibility is free via MCP.
+
 ## Why MCP rather than a plugin
 
 A plugin works in one host. A skill works in one host. The Model Context Protocol works across all of them, and is the nearest thing the agent ecosystem has to a shared standard.

@@ -12,7 +12,7 @@ Works with any MCP-speaking host: Claude Code, OpenClaw, Hermes Agent, and anyth
 
 ## The problem
 
-Agents like OpenClaw and Hermes can already act on your machine. What they cannot do is convince anyone to let them near production, because there is no way to answer three questions:
+Agents like OpenClaw and Hermes can already act on your machine. What is missing is a shared trust layer that can answer three questions before an operation is relied on:
 
 1. **Was it right?** The agent asserts an answer. Nothing shows where it came from or how often it is wrong.
 2. **What if it is wrong?** Nothing stands between "the model decided to restart the database" and the database restarting.
@@ -91,7 +91,7 @@ flowchart TD
     ALAN -->|approve| EF
     ALAN -->|deny| NO["refused — nothing ran"]
 
-    EF -->|6. the only door| SYS1
+    EF -->|6. ops-guard execution path| SYS1
     EF --> SYS2
     EF --> SYS3
 
@@ -110,9 +110,9 @@ flowchart TD
 **Design decisions from the 2026-09-19 project-definition session** (Python + FastMCP; judge included in the current design):
 
 1. **Fixes come in two authorization paths.** An invocation covered by standing authorization for an *allowlisted, human-verified script* may run unattended (always logged). A *model-composed* fix or invocation outside that authorization requires fresh human approval.
-2. **The judge is advisory in the current design.** It labels every proposal with a risk class and confidence; those labels are logged but never grant or withdraw authorization. Judge unavailability does not grant authorization.
+2. **The judge is advisory in the current design.** It labels every proposal with a risk class and an advisory confidence estimate; those labels are logged but never grant or withdraw authorization. Judge unavailability does not grant authorization.
 3. **The allowlist anchors to the script itself** (exact path/content), not to the model's description of it — a model cannot get arbitrary commands through by naming them "update n8n".
- 4. **Agent-agnostic server; OpenCode is the first host** (dogfooded daily). OpenClaw/Hermes compatibility is free via MCP.
+ 4. **Agent-agnostic server; OpenCode is the first host** (dogfooded daily). OpenClaw and Hermes can use the server through MCP, subject to their own host controls.
 
 **Adversarial-review amendments (GPT-6 Astra + DeepSeek cross-check, 2026-09-19):**
 

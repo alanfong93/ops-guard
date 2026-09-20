@@ -1,8 +1,8 @@
 # ops-guard
 
-**An MCP server that makes an AI agent safe enough to point at production.**
+**An MCP server for cited runbook guidance, controlled execution, and durable audit records.**
 
-Cited answers from your runbooks. A two-step approval gate before anything destructive runs. An audit log of everything it did. And a published accuracy score, so the claim is checkable rather than asserted.
+Cited answers from your runbooks. Standing authorization for permitted invocations, fresh approval for model-composed fixes, and an audit log of what happened. Retrieval results are published as evidence, not as a claim of operational safety.
 
 Works with any MCP-speaking host: Claude Code, OpenClaw, Hermes Agent, and anything else that adopts the protocol.
 
@@ -32,14 +32,14 @@ search_runbook(question) -> answer + the source passage it came from
 
 The answer arrives with its evidence attached, so a human can check the reasoning instead of trusting the output. Same principle throughout: **show the working, never just the verdict.**
 
-### 2. A two-step approval gate
+### 2. Authorization for submitted operations
 
 ```
-propose_fix(problem)          -> { plan, token }     # changes nothing
-execute_fix(token, approval)  -> refuses without a human approval
+propose_fix(problem) -> { plan, token }  # changes nothing
+execute_fix(token)   -> runs only under standing authorization or proposal-bound approval
 ```
 
-Proposing and executing are separate calls. The first is always safe to run. The second will not proceed without an approval a human supplied.
+Proposing and executing are separate calls. An invocation covered by standing authorization may run unattended. A model-composed fix or invocation outside that authorization requires fresh human approval bound to the specific proposal; the proposing agent cannot supply or manufacture that approval.
 
 **The gate lives in the server, not in the host.** That is the design decision this project exists to test. Approval is normally a client concern, which means it disappears the moment you swap agents. Here it survives whatever is driving.
 
@@ -49,26 +49,26 @@ Append-only. Every call: what was asked, what came back, what executed, which ap
 
 ### 4. An eval harness
 
-Not an MCP tool. A test suite in this repo: a fixed question set with known-correct answers, scored against the retrieval, with a naive keyword-search baseline for comparison.
+Not an MCP tool. A test suite in this repo: a documented assessment set with reference retrieval results, scored against a declared retrieval baseline. Retrieval evidence is separate from judgment, authorization, and execution evidence.
 
 **The MCP server is the product. The eval harness is the evidence.** A safety claim with no number behind it is decoration.
 
 ## How it sits between the agent and production
 
-The agent has no direct line to the systems it operates — no shell shortcut. Every operation passes through the gate, whatever agent is driving.
+For operations submitted through ops-guard, the server applies the gate before execution. Preventing an agent from using an independent path to the systems requires deployment controls outside this server.
 
 ```mermaid
 flowchart TD
     ALAN["Alan"] -->|'update n8n'| AGENT{{"Agent<br>OpenCode · OpenClaw · Hermes · any MCP host"}}
 
-    subgraph OPSGUARD["ops-guard MCP server — the only path to production"]
+    subgraph OPSGUARD["ops-guard MCP server — checks submitted operations"]
         direction TB
         SR["search_runbook(question)<br>→ answer + source passage"]
         RB[("runbooks/<br>verified procedures only")]
         PF["propose_fix(problem)<br>→ plan + one-time token<br>changes NOTHING")]
         JD{"Judge<br>local LLM via Ollama<br>risk class + confidence"}
         GATE{"Gate check"}
-        AL[("allowlist<br>verified script paths")]
+    AL[("standing authorization<br>script + action + target + args + preconditions")]
         AUD[("append-only audit log")]
     end
 
@@ -86,7 +86,7 @@ flowchart TD
     JD -->|5. safe / review / critical| GATE
     AL --- GATE
 
-    GATE -->|allowlisted script<br>auto-runs, always logged| EF["execute_fix(token)"]
+    GATE -->|authorized invocation<br>may run unattended, always logged| EF["execute_fix(token)"]
     GATE -->|model-composed fix<br>needs approval| ALAN
     ALAN -->|approve| EF
     ALAN -->|deny| NO["refused — nothing ran"]
@@ -109,8 +109,8 @@ flowchart TD
 
 **Design decisions from the 2026-09-19 project-definition session** (Python + FastMCP; judge included in the current design):
 
-1. **Fixes come in two kinds.** A fix that maps to an *allowlisted, human-verified script* auto-executes (always logged) — the model generates nothing, it invokes a known procedure. A *model-composed* fix requires human approval before execution.
-2. **The judge is advisory in the current design.** It labels every proposal with a risk class and confidence; those labels are logged but never veto a standing human decision. The audit trail of label-vs-decision is evidence for any later decision about low-risk novel fixes.
+1. **Fixes come in two authorization paths.** An invocation covered by standing authorization for an *allowlisted, human-verified script* may run unattended (always logged). A *model-composed* fix or invocation outside that authorization requires fresh human approval.
+2. **The judge is advisory in the current design.** It labels every proposal with a risk class and confidence; those labels are logged but never grant or withdraw authorization. Judge unavailability does not grant authorization.
 3. **The allowlist anchors to the script itself** (exact path/content), not to the model's description of it — a model cannot get arbitrary commands through by naming them "update n8n".
  4. **Agent-agnostic server; OpenCode is the first host** (dogfooded daily). OpenClaw/Hermes compatibility is free via MCP.
 
@@ -119,7 +119,7 @@ flowchart TD
  5. **An allowlisted script authorizes the *invocation*, not just the content.** The allowlist binds action, target, arguments, and preconditions — verified content run at the wrong moment or with wrong arguments is still a failure.
  6. **Approval cannot be agent-supplied.** Human approval arrives through a separate channel, bound to the frozen proposal; tokens are consumed atomically. The proposing agent can never manufacture the permission the gate exists to require.
  7. **Model consensus escalates; it never clears.** Reviewer models may force human review (veto-side only). Only a standing rule the operator wrote, or a click the operator made, authorizes execution. Whether and when tribunal-as-triage belongs is left for stage-loop to determine from audit agreement data.
- 8. **Judge semantics get an explicit decision table in the project definition** — "advisory" and "judge down → needs-review" currently imply different authority; the table fixes which label/failure states interrupt auto-execution, which never block a human, and which block execution outright (failed audit persistence always blocks).
+ 8. **Judge authority is explicit.** Its assessment and unavailability never grant authorization. Required audit recording and authorization checks remain server controls; detailed mechanics are left for stage-loop.
 
 Also recorded for stage-loop to assess: a durable execution state machine (`proposed → authorized → started → succeeded/failed/outcome-unknown`), BM25 alongside the naive keyword baseline, four separated evidence layers in the eval (retrieval / judgment / authorization / execution), and public example runbooks that stay executable — placeholders only in machine-specific config.
 

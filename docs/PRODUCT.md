@@ -1,19 +1,29 @@
 # Who
-
 Alan, driving an AI agent — OpenCode today, any MCP-speaking agent (OpenClaw, Hermes) tomorrow — against his self-hosted production systems.
 
-# Must be able to
+# What
+An MCP server that provides cited runbook guidance and enforces human-defined authorization for operations submitted through it.
 
-1. Ask "how do I update n8n?" and get the answer **with the runbook passage it came from** — cited, and only from verified procedures
-2. Run a verified procedure unattended: "update n8n" maps to the allowlisted script, auto-executes, always logged
-3. Have any **model-composed** fix stopped at the gate until Alan approves it
-4. See afterwards exactly what was asked, returned, executed, and who approved it
-5. Check the accuracy claim: a published retrieval score against a naive keyword baseline
+# Problem
+An agent's proposed operational action needs traceable procedural evidence, enforceable permission, and a durable record; the agent's own assertions are insufficient.
+
+# How
+Retrieve guidance from human-verified runbooks with supporting passages. Execute only under applicable standing authorization or fresh human approval, and record the evidence, authorization, and observed outcome.
+
+# Required capabilities and constraints
+
+- Return cited runbook guidance; absent required procedural evidence, refuse execution.
+- Bind standing authorization to the verified script and complete permitted invocation: action, target, arguments, and preconditions. Matching invocations may run unattended.
+- Require fresh human approval for model-composed fixes and invocations outside standing authorization. Approval must bind to the specific proposal and cannot be supplied or manufactured by the proposing agent.
+- Enforce authorization in the server. Judge assessments are advisory: neither an assessment nor judge unavailability grants or withdraws authorization.
+- Keep durable audit records of requests, returned guidance, proposals, authorization used, execution, and observed outcomes. Refuse execution if required audit recording fails.
+- Publish retrieval-quality evidence against a declared baseline, without treating that score as proof of operational safety.
+- Make the protection boundary explicit: ops-guard governs calls through its server; preventing independent agent access requires deployment controls.
 
 # Done when
 
-"Update n8n" in a fresh agent session returns the cited steps and executes the allowlisted script fully logged; a novel fix refuses to execute without approval; the eval harness beats the keyword baseline. Fails closed everywhere: judge down → needs-review, no retrieval → no execution path, audit write fails → refuse to execute.
+An agent can obtain cited guidance, execute an invocation covered by standing authorization without fresh approval, and execute other permitted proposals only with genuine proposal-bound human approval. Missing evidence, missing authorization, and audit-recording failure prevent execution. Judge advice cannot authorize execution. These behaviours and their audit records are demonstrated, and retrieval outperforms the declared baseline on a documented assessment.
 
 # Not this project
 
-Being an agent. Model hosting or fine-tuning. A UI. Multi-tenancy. Anything resembling a full ITSM tool.
+Being an agent. Model hosting or fine-tuning. A UI. Multi-tenancy. A full ITSM tool. Guaranteeing arbitrary agent behaviour outside the server's control.

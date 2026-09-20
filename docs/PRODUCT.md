@@ -12,6 +12,10 @@ Retrieve guidance from human-verified runbooks with supporting passages. Execute
 
 # Required capabilities and constraints
 
+- A **human-verified runbook** is a curated procedure whose guidance and referenced operation have been reviewed for this project.
+- **Standing authorization** binds a permitted invocation to the verified script, action, target, arguments, and preconditions; it is the basis for unattended execution.
+- A **declared baseline** is the named retrieval comparator and assessment method recorded with the published result.
+- An **observed outcome** is the execution result recorded after the operation, including an explicitly unknown outcome when completion cannot be confirmed.
 - Return cited runbook guidance; absent required procedural evidence, refuse execution.
 - Bind standing authorization to the verified script and complete permitted invocation: action, target, arguments, and preconditions. Matching invocations may run unattended.
 - Require fresh human approval for model-composed fixes and invocations outside standing authorization. Approval must bind to the specific proposal and cannot be supplied or manufactured by the proposing agent.

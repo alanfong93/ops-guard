@@ -2,6 +2,10 @@
 
 Update docs in the same commit as the behaviour change. Mermaid only. No empty scaffolds.
 
+## Project-definition rule
+
+`project-docs` defines what the project is, the problem it tackles, how it tackles it, and what is required. `stage-loop` determines implementation stages, sequencing, and acceptance work. Do not add v0/v1/v2 or phase language to the project definition.
+
 Required when they apply:
 
 - `docs/PRODUCT.md` — who it is for, what they must be able to do, done when, not this project

@@ -34,3 +34,6 @@ Thumbs.db
 coverage/
 .coverage
 htmlcov/
+
+# dev-loop state
+.dev-loop-state.json

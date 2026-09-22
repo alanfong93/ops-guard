@@ -144,3 +144,49 @@ def test_frozen_bytes_are_immutable_across_operations(service) -> None:
     finally:
         conn.close()
     assert raw == before
+
+
+def test_digest_is_keyed_across_services(tmp_path, clock) -> None:
+    import os
+
+    from ops_guard import ProposalService, ProposalStore
+
+    path = tmp_path / "shared.db"
+    key_a, key_b = os.urandom(32), os.urandom(32)
+    service_a = ProposalService(ProposalStore(path), token_key=key_a, clock=clock)
+    service_b = ProposalService(ProposalStore(path), token_key=key_b, clock=clock)
+    issued = service_a.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    with pytest.raises(UnknownTokenError):
+        service_b.resolve(issued.token)
+    with pytest.raises(UnknownTokenError):
+        service_b.consume(issued.token)
+    # The minting service still resolves its own token.
+    assert service_a.resolve(issued.token).proposal_id == issued.proposal_id
+
+
+def test_naive_clock_is_rejected_with_typed_error(tmp_path) -> None:
+    import os
+    from datetime import datetime
+
+    from ops_guard import ProposalService, ProposalStore
+
+    naive = datetime(2026, 9, 22, 12, 0, 0)  # no tzinfo
+    service = ProposalService(
+        ProposalStore(tmp_path / "proposals.db"), token_key=os.urandom(32), clock=lambda: naive
+    )
+    with pytest.raises(ValueError):
+        service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+
+
+def test_resolved_proposal_exposes_token_digest(service) -> None:
+    import hashlib
+    import hmac as hmac_module
+
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    expected = hmac_module.new(
+        service._token_key, issued.token.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    resolved = service.resolve(issued.token)
+    assert resolved.token_digest == expected
+    consumed = service.consume(issued.token)
+    assert consumed.token_digest == expected

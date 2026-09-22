@@ -121,6 +121,47 @@ def test_non_string_bound_field_is_rejected() -> None:
         raise AssertionError("non-string action must be rejected")
 
 
+non_representable_ints = st.integers(min_value=2**53 + 1, max_value=2**64).filter(
+    lambda v: float(v) != v
+)
+
+
+@given(non_representable_ints)
+@settings(max_examples=50)
+def test_integers_beyond_double_precision_are_rejected(large: int) -> None:
+    try:
+        make_invocation(arguments={"n": large}).canonical_bytes()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"{large} must be rejected, not silently rounded")
+
+
+@given(st.integers(min_value=-(2**53), max_value=2**53))
+@settings(max_examples=50)
+def test_integers_within_double_precision_are_accepted(safe: int) -> None:
+    invocation = make_invocation(arguments={"n": safe})
+    parsed = json.loads(invocation.canonical_bytes())
+    assert parsed["arguments"]["n"] == safe
+
+
+def test_integer_boundary_is_exactly_two_power_53() -> None:
+    assert make_invocation(arguments={"n": 9007199254740992}).digest  # 2**53 accepted
+    try:
+        make_invocation(arguments={"n": 9007199254740993}).canonical_bytes()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("2**53 + 1 must be rejected")
+
+
+def test_exactly_representable_large_integers_are_accepted() -> None:
+    # 2**60 and its multiples of the local ULP (256) survive the double
+    # round-trip exactly and are legitimate invocation arguments.
+    assert make_invocation(arguments={"n": 2**60}).digest
+    assert make_invocation(arguments={"n": 2**60 + 256}).digest
+
+
 def test_digest_matches_digest_bytes_helper() -> None:
     invocation = make_invocation()
     assert digest_bytes(invocation.canonical_bytes()) == invocation.digest

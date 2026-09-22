@@ -42,8 +42,39 @@ def test_crash_during_open_leaves_no_proposal(db_path, token_key, clock) -> None
                 """
             )
             raise RuntimeError("crash before commit")
+    # Direct row check: the rollback must have removed the crashed insert.
+    check = sqlite3.connect(db_path)
+    try:
+        count = check.execute(
+            "SELECT COUNT(*) FROM proposals WHERE proposal_id = 'x'"
+        ).fetchone()[0]
+    finally:
+        check.close()
+    assert count == 0
     with pytest.raises(UnknownTokenError):
         service.resolve("any-token")
+
+
+def test_callback_cannot_commit_the_consume_transaction(db_path, token_key, clock) -> None:
+    service = make_service(db_path, token_key=token_key, clock=clock)
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+
+    def committing_callback(conn) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS audit_probe (id INTEGER PRIMARY KEY, note TEXT)"
+        )
+        conn.execute("INSERT INTO audit_probe (note) VALUES ('execution-start')")
+        conn.commit()  # must be unreachable through the guarded connection
+
+    with pytest.raises(AttributeError):
+        service.consume(issued.token, same_transaction=committing_callback)
+
+    # Nothing committed: no audit row, token still eligible and consumable.
+    assert probe_rows(db_path) == []
+    resolved = service.resolve(issued.token)
+    assert not resolved.consumed
+    consumed = service.consume(issued.token)
+    assert consumed.consumed
 
 
 def test_consume_rolls_back_when_audit_append_fails(db_path, token_key, clock) -> None:

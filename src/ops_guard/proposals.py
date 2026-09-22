@@ -1,9 +1,13 @@
 """Proposal lifecycle: freeze, resolve, consume exactly once (ADR 0002).
 
+Enforcement mechanism: every writer transaction opens BEGIN IMMEDIATE, so
+writes are serialized from transaction start and the pre-transaction checks
+classify the rejection precisely; the compare-and-swap UPDATE's state and
+expiry predicates are belt-and-braces, not the load-bearing guarantee.
+
 Rejection order on a presented token is deterministic: unknown, then
-invocation mismatch, then already consumed, then expired. The compare-and-swap
-UPDATE inside the transaction — not the pre-checks — is the authority on
-exactly-once consumption.
+invocation mismatch, then already consumed, then expired. Every rejection
+happens before any execution or side effect.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from ops_guard.errors import (
     UnknownTokenError,
 )
 from ops_guard.invocation import Invocation, parse_frozen_invocation
-from ops_guard.store import AuditAppend, ProposalStore
+from ops_guard.store import AuditAppend, GuardedConnection, ProposalStore
 
 
 def default_clock() -> datetime:
@@ -57,6 +61,7 @@ class FrozenProposal:
     proposal_id: str
     invocation: Invocation
     invocation_digest: str
+    token_digest: str
     created_at: datetime
     expires_at: datetime
     consumed_at: Optional[datetime]
@@ -83,11 +88,17 @@ class ProposalService:
     def _token_digest(self, token: str) -> str:
         return hmac.new(self._token_key, token.encode("utf-8"), hashlib.sha256).hexdigest()
 
+    def _now(self) -> datetime:
+        moment = self._clock()
+        if moment.tzinfo is None:
+            raise ValueError("clock must return timezone-aware datetimes")
+        return moment
+
     def open_proposal(self, invocation: Invocation, *, ttl: timedelta) -> IssuedProposal:
         """Freeze the invocation, mint a 256-bit token, fix the absolute expiry."""
         if not isinstance(ttl, timedelta) or ttl.total_seconds() <= 0:
             raise ValueError("ttl must be a positive timedelta")
-        now = self._clock()
+        now = self._now()
         frozen_bytes = invocation.canonical_bytes()
         digest = hashlib.sha256(frozen_bytes).hexdigest()
         proposal_id = uuid.uuid4().hex
@@ -120,11 +131,11 @@ class ProposalService:
     def resolve(self, token: str, *, expected_digest: str | None = None) -> FrozenProposal:
         """Read-only eligibility check; raises on unknown, mismatched, consumed, expired."""
         digest = self._token_digest(token)
-        with self._store.transaction() as conn:
+        with self._store.read() as conn:
             row = conn.execute(
                 "SELECT * FROM proposals WHERE token_digest = ?", (digest,)
             ).fetchone()
-            self._check(row, digest, expected_digest, self._clock())
+            self._check(row, digest, expected_digest, self._now())
             return _row_to_proposal(row)
 
     def consume(
@@ -136,13 +147,16 @@ class ProposalService:
     ) -> FrozenProposal:
         """Consume exactly once, optionally committing ``same_transaction`` atomically.
 
-        The callback receives the live connection so the pre-execution audit
-        append can join the consume transaction (ADR 0002, rule 6). If it
-        raises, the consumption rolls back and the token stays eligible.
+        The callback receives a guarded connection so the pre-execution audit
+        append can join the consume transaction (ADR 0002, rule 6); transaction
+        control is unreachable from the callback. If it raises, the consumption
+        rolls back and the token stays eligible.
         """
         digest = self._token_digest(token)
-        now = self._clock()
         with self._store.transaction() as conn:
+            # Sampled after the write lock is held so expiry is judged at
+            # execution time, not queue-entry time.
+            now = self._now()
             row = conn.execute(
                 "SELECT * FROM proposals WHERE token_digest = ?", (digest,)
             ).fetchone()
@@ -160,10 +174,10 @@ class ProposalService:
                 fresh = conn.execute(
                     "SELECT * FROM proposals WHERE token_digest = ?", (digest,)
                 ).fetchone()
-                self._check(fresh, digest, expected_digest, self._clock())
+                self._check(fresh, digest, expected_digest, self._now())
                 raise ProposalError("consume did not apply although all checks passed")
             if same_transaction is not None:
-                same_transaction(conn)
+                same_transaction(GuardedConnection(conn))
             final = conn.execute(
                 "SELECT * FROM proposals WHERE token_digest = ?", (digest,)
             ).fetchone()
@@ -191,6 +205,7 @@ def _row_to_proposal(row: sqlite3.Row) -> FrozenProposal:
         proposal_id=row["proposal_id"],
         invocation=parse_frozen_invocation(row["invocation_bytes"]),
         invocation_digest=row["invocation_digest"],
+        token_digest=row["token_digest"],
         created_at=parse_timestamp(row["created_at"]),
         expires_at=parse_timestamp(row["expires_at"]),
         consumed_at=parse_timestamp(row["consumed_at"]) if row["consumed_at"] else None,

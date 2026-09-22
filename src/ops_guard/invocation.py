@@ -45,7 +45,12 @@ class Invocation:
         }
 
     def canonical_bytes(self) -> bytes:
-        """RFC 8785 (JCS) canonical serialization of the complete invocation."""
+        """RFC 8785 (JCS) canonical serialization of the complete invocation.
+
+        This is the freeze boundary: caller-supplied integer arguments must
+        survive the IEEE-754 double round-trip exactly, or they are rejected.
+        """
+        _reject_unrepresentable_numbers(self.to_json())
         return canonicalize_json(self.to_json())
 
     @property
@@ -67,8 +72,28 @@ class Invocation:
 
 
 def canonicalize_json(value: Any) -> bytes:
-    """JCS-canonicalize a JSON-compatible value; raises on non-serializable input."""
+    """JCS-canonicalize a JSON-compatible value; raises on non-serializable input.
+
+    Pure canonicalization: no argument-domain validation. The freeze boundary
+    (``Invocation.canonical_bytes``) rejects integer arguments that would lose
+    precision as IEEE-754 doubles.
+    """
     return jcs.canonicalize(value)
+
+
+def _reject_unrepresentable_numbers(value: Any) -> None:
+    if isinstance(value, dict):
+        for item in value.values():
+            _reject_unrepresentable_numbers(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_unrepresentable_numbers(item)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        if abs(value) > 2**53 and float(value) != value:
+            raise ValueError(
+                f"integer {value} is not exactly representable as an IEEE-754 "
+                "double; encode it as a string or it could collide with another invocation"
+            )
 
 
 def digest_bytes(canonical: bytes) -> str:

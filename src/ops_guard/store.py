@@ -28,6 +28,33 @@ CREATE INDEX IF NOT EXISTS idx_proposals_invocation_digest
 """
 
 
+class GuardedConnection:
+    """Deny-by-default facade over a live transaction connection.
+
+    Handed to audit-transaction callbacks so they can execute statements but
+    cannot commit, roll back, or run scripts (executescript issues an implicit
+    COMMIT). Transaction-control access raises ``AttributeError``.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, parameters: tuple = ()) -> sqlite3.Cursor:
+        return self._conn.execute(sql, parameters)
+
+    def executemany(self, sql: str, parameters: list[tuple]) -> sqlite3.Cursor:
+        return self._conn.executemany(sql, parameters)
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._conn.in_transaction
+
+    def __getattr__(self, name: str):
+        raise AttributeError(
+            f"{name!r} is not available inside an audit transaction callback"
+        )
+
+
 class ProposalStore:
     """File-backed store; one short-lived connection per operation."""
 
@@ -52,7 +79,20 @@ class ProposalStore:
             except BaseException:
                 conn.execute("ROLLBACK")
                 raise
+            if not conn.in_transaction:
+                raise RuntimeError(
+                    "unit of work was committed or rolled back inside the callback"
+                )
             conn.execute("COMMIT")
+        finally:
+            conn.close()
+
+    @contextmanager
+    def read(self) -> Iterator[sqlite3.Connection]:
+        """Read-only access without taking the write lock."""
+        conn = self._connect()
+        try:
+            yield conn
         finally:
             conn.close()
 

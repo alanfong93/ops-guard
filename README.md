@@ -1,10 +1,10 @@
 # ops-guard
 
-**An MCP server for cited runbook guidance, controlled execution, and durable audit records.**
+**A single-operator MCP server for cited runbook guidance, controlled execution, and durable audit records.**
 
-Cited answers from your runbooks. Standing authorization for permitted invocations, fresh approval for model-composed fixes, and an audit log of what happened. Retrieval results are published as evidence, not as a claim of operational safety.
+Cited answers from operator-verified runbooks. Standing authorization for permitted invocations, fresh approval for model-composed fixes, and an audit log of what happened. Retrieval results are published as evidence, not as a claim of operational safety.
 
-Works with any MCP-speaking host: Claude Code, OpenClaw, Hermes Agent, and anything else that adopts the protocol.
+It works with any MCP-speaking host: OpenCode, OpenClaw, Hermes Agent, and anything else that adopts the protocol. Alan's self-hosted systems are the initial deployment; shared-operator and multi-tenant authorization are outside this project's boundary.
 
 **Status: project definition complete. Nothing is built yet.**
 
@@ -36,16 +36,16 @@ The answer arrives with its evidence attached, so a human can check the reasonin
 
 ```
 propose_fix(problem) -> { plan, token }  # changes nothing
-execute_fix(token)   -> runs only under standing authorization or proposal-bound approval
+execute_fix(token)   -> runs only if evidence, preconditions, audit, and authorization all pass
 ```
 
-Proposing and executing are separate calls. An invocation covered by standing authorization may run unattended. A model-composed fix or invocation outside that authorization requires fresh human approval bound to the specific proposal; the proposing agent cannot supply or manufacture that approval.
+Proposing and executing are separate calls. `execute_fix` runs only when all required gates pass: cited procedural evidence, verified preconditions, durable audit recording, and either standing authorization or proposal-bound approval. An invocation covered by standing authorization may run unattended. A model-composed fix or invocation outside that authorization requires fresh human approval bound to the specific proposal; the proposing agent cannot supply or manufacture that approval.
 
 **The gate lives in the server, not in the host.** That is the design decision this project exists to test. Approval is normally a client concern, which means it disappears the moment you swap agents. Here it survives whatever is driving.
 
 ### 3. An audit log
 
-Append-only. Every call: what was asked, what came back, what executed, which approval authorised it.
+Append-only durable operational history. Every call records what was asked, what came back, what executed, and which approval authorised it. This is not a tamper-evident ledger or protection against storage-level deletion; deployments that need that assurance must retain the records outside the server.
 
 ### 4. An eval harness
 
@@ -66,8 +66,8 @@ flowchart TD
         SR["search_runbook(question)<br>→ answer + source passage"]
         RB[("runbooks/<br>verified procedures only")]
         PF["propose_fix(problem)<br>→ plan + one-time token<br>changes NOTHING")]
-        JD{"Judge<br>local LLM via Ollama<br>risk class + confidence"}
-        GATE{"Gate check"}
+        JD{"Judge<br>local LLM via Ollama<br>risk class + advisory signal"}
+        GATE{"Gate check<br>evidence + preconditions<br>audit + authorization"}
     AL[("standing authorization<br>script + action + target + args + preconditions")]
         AUD[("append-only audit log")]
     end
@@ -86,10 +86,11 @@ flowchart TD
     JD -->|5. safe / review / critical| GATE
     AL --- GATE
 
-    GATE -->|authorized invocation<br>may run unattended, always logged| EF["execute_fix(token)"]
-    GATE -->|model-composed fix<br>needs approval| ALAN
+    GATE -->|standing authorization<br>may run unattended, always logged| EF["execute_fix(token)"]
+    GATE -->|approval required| ALAN
     ALAN -->|approve| EF
     ALAN -->|deny| NO["refused — nothing ran"]
+    GATE -->|evidence, precondition, or audit failure| NO
 
     EF -->|6. ops-guard execution path| SYS1
     EF --> SYS2
@@ -107,21 +108,19 @@ flowchart TD
     style EF fill:#bbf7d0,stroke:#166534,color:#000
 ```
 
-**Design decisions from the 2026-09-19 project-definition session** (Python + FastMCP; judge included in the current design):
+**Product constraints:**
 
 1. **Fixes come in two authorization paths.** An invocation covered by standing authorization for an *allowlisted, human-verified script* may run unattended (always logged). A *model-composed* fix or invocation outside that authorization requires fresh human approval.
-2. **The judge is advisory in the current design.** It labels every proposal with a risk class and an advisory confidence estimate; those labels are logged but never grant or withdraw authorization. Judge unavailability does not grant authorization.
+2. **The judge is advisory in the current design.** It labels every proposal with a risk class and a documented advisory signal; its derivation is recorded, but it never grants or withdraws authorization. Judge unavailability does not grant authorization.
 3. **The allowlist anchors to the script itself** (exact path/content), not to the model's description of it — a model cannot get arbitrary commands through by naming them "update n8n".
- 4. **Agent-agnostic server; OpenCode is the first host** (dogfooded daily). OpenClaw and Hermes can use the server through MCP, subject to their own host controls.
-
-**Adversarial-review amendments (GPT-6 Astra + DeepSeek cross-check, 2026-09-19):**
+ 4. **Agent-agnostic server.** OpenCode, OpenClaw, Hermes, and other MCP hosts can use the server through MCP, subject to their own host controls.
 
  5. **An allowlisted script authorizes the *invocation*, not just the content.** The allowlist binds action, target, arguments, and preconditions — verified content run at the wrong moment or with wrong arguments is still a failure.
- 6. **Approval cannot be agent-supplied.** Human approval arrives through a separate channel, bound to the frozen proposal; tokens are consumed atomically. The proposing agent can never manufacture the permission the gate exists to require.
- 7. **Model consensus escalates; it never clears.** Reviewer models may force human review (veto-side only). Only a standing rule the operator wrote, or a click the operator made, authorizes execution. Whether and when tribunal-as-triage belongs is left for stage-loop to determine from audit agreement data.
- 8. **Judge authority is explicit.** Its assessment and unavailability never grant authorization. Required audit recording and authorization checks remain server controls; detailed mechanics are left for stage-loop.
+ 6. **Approval cannot be agent-supplied.** The server accepts approval only from a configured operator identity through an approval channel independent of the proposing MCP host. It binds the frozen proposal, expiry, and one-time token; tokens are consumed atomically.
+ 7. **Model consensus escalates; it never clears.** Reviewer models may force human review (veto-side only). Only a standing rule the operator wrote, or a click the operator made, authorizes execution.
+8. **Judge authority is explicit.** Its assessment and unavailability never grant authorization. Required procedural evidence, preconditions, audit recording, and authorization checks remain server controls.
 
-Also recorded for stage-loop to assess: a durable execution state machine (`proposed → authorized → started → succeeded/failed/outcome-unknown`), BM25 alongside the naive keyword baseline, four separated evidence layers in the eval (retrieval / judgment / authorization / execution), and public example runbooks that stay executable — placeholders only in machine-specific config.
+Where an advisory judgment is used, its audit record retains the supplied evidence snapshot, model and inference configuration, versioned rubric and state schema, exact candidate menu where applicable, thresholds, and result or failure. Source evidence, declared expectations, independently observed outcomes, and deterministic derived facts remain distinguishable. A changed judgment is evaluated on labelled normal, ambiguous, and adversarial cases in shadow mode before it can influence operational recommendations; that evaluation never confers authorization.
 
 ## Why MCP rather than a plugin
 

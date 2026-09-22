@@ -31,9 +31,14 @@ erDiagram
     PROPOSAL ||--o{ AUDIT_RECORD : "creates"
     AUTHORIZATION ||--o{ AUDIT_RECORD : "is recorded in"
     PROPOSAL {
-        string token
-        string frozen_invocation
-        datetime expires_at
+        string proposal_id
+        blob invocation_bytes "canonical JCS bytes, immutable"
+        string invocation_digest "SHA-256 of the canonical bytes"
+        string token_digest "HMAC-SHA-256 of the one-time token"
+        datetime created_at
+        datetime expires_at "absolute"
+        string state "active or consumed"
+        datetime consumed_at
     }
     AUTHORIZATION {
         string type
@@ -47,3 +52,5 @@ erDiagram
         datetime recorded_at
     }
 ```
+
+The proposal store is transactional (SQLite today) so that token consumption can commit atomically with the pre-execution audit append; the frozen-invocation and token contract is recorded in [ADR 0002](adr/0002-frozen-invocation-audit-contract.md).

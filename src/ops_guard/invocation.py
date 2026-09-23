@@ -47,11 +47,31 @@ class Invocation:
     def canonical_bytes(self) -> bytes:
         """RFC 8785 (JCS) canonical serialization of the complete invocation.
 
-        This is the freeze boundary: caller-supplied integer arguments must
-        survive the IEEE-754 double round-trip exactly, or they are rejected.
+        This is the freeze boundary. The bytes must round-trip: re-parsing
+        them must yield a value that passes the numeric-domain guard and
+        re-canonicalizes byte-identically. A value whose serialization cannot
+        survive that cycle (e.g. large doubles whose ES6 digit-padding
+        re-parses to a non-representable integer) is rejected here rather
+        than being frozen into a proposal that consumers could never
+        re-verify — encode such values as strings.
         """
-        _reject_unrepresentable_numbers(self.to_json())
-        return canonicalize_json(self.to_json())
+        value = self.to_json()
+        _reject_unrepresentable_numbers(value)
+        try:
+            frozen = canonicalize_json(value)
+            reparsed = json.loads(frozen)
+        except (AttributeError, TypeError) as error:
+            raise ValueError(
+                "invocation contains values that are not JSON-representable "
+                f"({error}); mapping keys must be strings"
+            ) from error
+        _reject_unrepresentable_numbers(reparsed)
+        if canonicalize_json(reparsed) != frozen:
+            raise ValueError(
+                "invocation does not round-trip canonical serialization; "
+                "encode the affected values as strings"
+            )
+        return frozen
 
     @property
     def digest(self) -> str:

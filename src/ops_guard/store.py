@@ -27,32 +27,97 @@ CREATE INDEX IF NOT EXISTS idx_proposals_invocation_digest
     ON proposals (invocation_digest);
 """
 
+_TRANSACTION_CONTROL = frozenset(
+    {"begin", "commit", "end", "rollback", "abort", "savepoint", "release",
+     "vacuum", "attach", "detach"}
+)
 
-class GuardedConnection:
-    """Deny-by-default facade over a live transaction connection.
 
-    Handed to audit-transaction callbacks so they can execute statements but
-    cannot commit, roll back, or run scripts (executescript issues an implicit
-    COMMIT). Transaction-control access raises ``AttributeError``.
-    """
+def _reject_transaction_control(sql: str) -> None:
+    parts = sql.lstrip(" \t\r\n(;").split(None, 1)
+    lead = parts[0].lower().rstrip(";") if parts else ""
+    if lead in _TRANSACTION_CONTROL:
+        raise ValueError(
+            f"statement {lead.upper()!r} is not allowed inside an audit transaction callback"
+        )
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
 
-    def execute(self, sql: str, parameters: tuple = ()) -> sqlite3.Cursor:
-        return self._conn.execute(sql, parameters)
+class _GuardedCursor:
+    """Cursor facade exposing only reads; ``.connection`` is not reachable."""
 
-    def executemany(self, sql: str, parameters: list[tuple]) -> sqlite3.Cursor:
-        return self._conn.executemany(sql, parameters)
+    __slots__ = ("_cursor",)
+    _allowed = frozenset({"fetchone", "fetchall", "fetchmany", "lastrowid", "rowcount"})
 
-    @property
-    def in_transaction(self) -> bool:
-        return self._conn.in_transaction
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        object.__setattr__(self, "_cursor", cursor)
 
-    def __getattr__(self, name: str):
+    def __getattribute__(self, name: str):
+        if name in _GuardedCursor._allowed:
+            return object.__getattribute__(self, name)
         raise AttributeError(
             f"{name!r} is not available inside an audit transaction callback"
         )
+
+    def fetchone(self):
+        return object.__getattribute__(self, "_cursor").fetchone()
+
+    def fetchall(self):
+        return object.__getattribute__(self, "_cursor").fetchall()
+
+    def fetchmany(self, size: int = 1):
+        return object.__getattribute__(self, "_cursor").fetchmany(size)
+
+    @property
+    def lastrowid(self):
+        return object.__getattribute__(self, "_cursor").lastrowid
+
+    @property
+    def rowcount(self):
+        return object.__getattribute__(self, "_cursor").rowcount
+
+
+class GuardedConnection:
+    """Capability boundary around a live transaction connection.
+
+    ``__getattribute__`` whitelists the surface, so the real connection is not
+    reachable through instance attributes, and transaction-control SQL is
+    rejected up front (sqlite3 also refuses multi-statement strings, so a
+    statement-prefix check is sufficient). This prevents accidental or casual
+    transaction control by the audit callback. A determined in-process
+    adversary can bypass any Python-level guard; that residual is caught by
+    the ``in_transaction`` checks in ``ProposalStore.transaction``, which
+    raise instead of leaving a silent partial commit.
+    """
+
+    __slots__ = ("_conn",)
+    _allowed = frozenset({"execute", "executemany", "in_transaction"})
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        object.__setattr__(self, "_conn", conn)
+
+    def __getattribute__(self, name: str):
+        if name in GuardedConnection._allowed:
+            return object.__getattribute__(self, name)
+        raise AttributeError(
+            f"{name!r} is not available inside an audit transaction callback"
+        )
+
+    def execute(self, sql: str, parameters: tuple = ()) -> _GuardedCursor:
+        _reject_transaction_control(sql)
+        conn = object.__getattribute__(self, "_conn")
+        return _GuardedCursor(conn.execute(sql, parameters))
+
+    def executemany(self, sql: str, parameters: list[tuple]) -> _GuardedCursor:
+        _reject_transaction_control(sql)
+        conn = object.__getattribute__(self, "_conn")
+        return _GuardedCursor(conn.executemany(sql, parameters))
+
+    @property
+    def in_transaction(self) -> bool:
+        return object.__getattribute__(self, "_conn").in_transaction
+
+
+AuditAppend = Callable[[GuardedConnection], None]
 
 
 class ProposalStore:
@@ -70,14 +135,27 @@ class ProposalStore:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        """One durable unit of work; commits on clean exit, rolls back on any error."""
+        """One durable unit of work; commits on clean exit, rolls back on any error.
+
+        If the callback itself ended the transaction, the honest error is
+        raised — the on-disk state may then be durable and must be inspected —
+        rather than a misleading rollback failure masking the cause.
+        """
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn
-            except BaseException:
-                conn.execute("ROLLBACK")
+            except BaseException as error:
+                if not conn.in_transaction:
+                    raise RuntimeError(
+                        "unit of work was committed or rolled back inside the callback; "
+                        "on-disk state must be inspected"
+                    ) from error
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass  # the original error is the one that matters
                 raise
             if not conn.in_transaction:
                 raise RuntimeError(
@@ -95,6 +173,3 @@ class ProposalStore:
             yield conn
         finally:
             conn.close()
-
-
-AuditAppend = Callable[[sqlite3.Connection], None]

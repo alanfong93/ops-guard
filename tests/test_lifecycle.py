@@ -178,6 +178,27 @@ def test_naive_clock_is_rejected_with_typed_error(tmp_path) -> None:
         service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
 
 
+def test_offsetless_tzinfo_clock_is_rejected(tmp_path) -> None:
+    import os
+    from datetime import datetime, tzinfo
+
+    from ops_guard import ProposalService, ProposalStore
+
+    class BrokenZone(tzinfo):
+        def utcoffset(self, _dt):
+            return None
+
+        def dst(self, _dt):
+            return None
+
+    broken = datetime(2026, 9, 22, 12, 0, 0, tzinfo=BrokenZone())
+    service = ProposalService(
+        ProposalStore(tmp_path / "proposals.db"), token_key=os.urandom(32), clock=lambda: broken
+    )
+    with pytest.raises(ValueError):
+        service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+
+
 def test_resolved_proposal_exposes_token_digest(service) -> None:
     import hashlib
     import hmac as hmac_module

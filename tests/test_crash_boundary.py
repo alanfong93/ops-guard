@@ -77,6 +77,82 @@ def test_callback_cannot_commit_the_consume_transaction(db_path, token_key, cloc
     assert consumed.consumed
 
 
+def test_callback_cannot_send_transaction_control_sql(db_path, token_key, clock) -> None:
+    service = make_service(db_path, token_key=token_key, clock=clock)
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    attempts = [
+        "COMMIT",
+        "  commit;",
+        "ROLLBACK",
+        "BEGIN IMMEDIATE",
+        "SAVEPOINT sneaky",
+        "RELEASE sneaky",
+        "VACUUM",
+    ]
+
+    for statement in attempts:
+        def hostile(conn, statement=statement):
+            conn.execute(statement)
+            raise AssertionError("transaction-control SQL must be rejected first")
+
+        with pytest.raises(ValueError):
+            service.consume(issued.token, same_transaction=hostile)
+
+    # Every attempt was blocked before reaching SQLite; the token is intact.
+    resolved = service.resolve(issued.token)
+    assert not resolved.consumed
+    assert service.consume(issued.token).consumed
+
+
+def test_guarded_cursor_hides_the_real_connection(db_path, token_key, clock) -> None:
+    service = make_service(db_path, token_key=token_key, clock=clock)
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    observed = {}
+
+    def probing_callback(conn) -> None:
+        conn.execute("CREATE TABLE IF NOT EXISTS audit_probe (id INTEGER PRIMARY KEY, note TEXT)")
+        cursor = conn.execute(
+            "INSERT INTO audit_probe (note) VALUES ('execution-start')"
+        )
+        observed["lastrowid"] = cursor.lastrowid
+        observed["fetch"] = conn.execute(
+            "SELECT note FROM audit_probe"
+        ).fetchone()
+        for escape in ("_conn", "connection", "commit", "rollback", "executescript"):
+            try:
+                getattr(conn, escape)
+            except AttributeError:
+                pass
+            else:
+                raise AssertionError(f"guarded connection exposed {escape!r}")
+        try:
+            cursor.connection
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError("guarded cursor exposed .connection")
+
+    service.consume(issued.token, same_transaction=probing_callback)
+    assert observed["lastrowid"] == 1
+    assert observed["fetch"][0] == "execution-start"
+    assert probe_rows(db_path) == [("execution-start",)]
+
+
+def test_callback_that_ends_the_transaction_raises_honestly(db_path) -> None:
+    store = ProposalStore(db_path)
+    with pytest.raises(RuntimeError, match="committed or rolled back inside the callback"):
+        with store.transaction() as conn:
+            conn.execute("COMMIT")
+            raise ValueError("boom")
+    # The original error stays visible as the cause.
+    try:
+        with store.transaction() as conn:
+            conn.execute("COMMIT")
+            raise ValueError("boom")
+    except RuntimeError as error:
+        assert isinstance(error.__cause__, ValueError)
+
+
 def test_consume_rolls_back_when_audit_append_fails(db_path, token_key, clock) -> None:
     service = make_service(db_path, token_key=token_key, clock=clock)
     conn = sqlite3.connect(db_path)

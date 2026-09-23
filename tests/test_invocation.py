@@ -16,7 +16,10 @@ json_scalars = st.one_of(
     st.none(),
     st.booleans(),
     st.integers(min_value=-(2**31), max_value=2**31),
-    st.floats(allow_nan=False, allow_infinity=False),
+    # The freezable numeric domain: floats up to 2**53 round-trip ES6
+    # serialization exactly; larger values whose digits do not round-trip are
+    # rejected at the freeze boundary and encoded as strings (tested below).
+    st.floats(allow_nan=False, allow_infinity=False, min_value=-(2**53), max_value=2**53),
     st.text(max_size=24),
 )
 
@@ -121,9 +124,9 @@ def test_non_string_bound_field_is_rejected() -> None:
         raise AssertionError("non-string action must be rejected")
 
 
-non_representable_ints = st.integers(min_value=2**53 + 1, max_value=2**64).filter(
-    lambda v: float(v) != v
-)
+non_representable_ints = st.tuples(
+    st.integers(min_value=54, max_value=63), st.integers(min_value=0, max_value=2**30)
+).map(lambda pair: 2 ** pair[0] + 2 * pair[1] + 1)  # odd above a power of two: never exactly representable
 
 
 @given(non_representable_ints)
@@ -135,6 +138,17 @@ def test_integers_beyond_double_precision_are_rejected(large: int) -> None:
         pass
     else:
         raise AssertionError(f"{large} must be rejected, not silently rounded")
+
+
+@given(non_representable_ints)
+@settings(max_examples=50)
+def test_negative_lossy_integers_are_rejected(large: int) -> None:
+    try:
+        make_invocation(arguments={"n": -large}).canonical_bytes()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"-{large} must be rejected, not silently rounded")
 
 
 @given(st.integers(min_value=-(2**53), max_value=2**53))
@@ -155,11 +169,25 @@ def test_integer_boundary_is_exactly_two_power_53() -> None:
         raise AssertionError("2**53 + 1 must be rejected")
 
 
-def test_exactly_representable_large_integers_are_accepted() -> None:
-    # 2**60 and its multiples of the local ULP (256) survive the double
-    # round-trip exactly and are legitimate invocation arguments.
-    assert make_invocation(arguments={"n": 2**60}).digest
-    assert make_invocation(arguments={"n": 2**60 + 256}).digest
+def test_values_that_cannot_round_trip_are_rejected_at_freeze() -> None:
+    # 2**60's ES6 fixed-notation form re-parses to a non-representable int,
+    # so freezing it would produce bytes no consumer could ever re-verify.
+    for value in (2**60, 2.0**60):
+        try:
+            make_invocation(arguments={"n": value}).canonical_bytes()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{value!r} must be rejected at freeze")
+
+
+def test_non_string_mapping_keys_are_rejected_as_domain_errors() -> None:
+    try:
+        make_invocation(arguments={1: "x"}).canonical_bytes()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("non-string mapping keys must raise a domain ValueError")
 
 
 def test_digest_matches_digest_bytes_helper() -> None:

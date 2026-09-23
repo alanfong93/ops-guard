@@ -90,7 +90,7 @@ class ProposalService:
 
     def _now(self) -> datetime:
         moment = self._clock()
-        if moment.tzinfo is None:
+        if moment.tzinfo is None or moment.utcoffset() is None:
             raise ValueError("clock must return timezone-aware datetimes")
         return moment
 
@@ -147,10 +147,13 @@ class ProposalService:
     ) -> FrozenProposal:
         """Consume exactly once, optionally committing ``same_transaction`` atomically.
 
-        The callback receives a guarded connection so the pre-execution audit
-        append can join the consume transaction (ADR 0002, rule 6); transaction
-        control is unreachable from the callback. If it raises, the consumption
-        rolls back and the token stays eligible.
+        The callback receives a ``GuardedConnection`` so the pre-execution
+        audit append can join the consume transaction (ADR 0002, rule 6):
+        transaction-control SQL and attribute reach-ins are rejected. If the
+        callback raises, the consumption rolls back and the token stays
+        eligible. If a callback somehow ends the transaction itself, the
+        store raises instead of committing silently — the guarantee is
+        detection with fail-closed behaviour, not a Python sandbox.
         """
         digest = self._token_digest(token)
         with self._store.transaction() as conn:

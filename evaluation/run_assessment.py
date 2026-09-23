@@ -52,8 +52,8 @@ def verify_dataset_integrity(manifest: dict, documents: list[dict]) -> None:
 def document_order_baseline(manifest: dict, limit: int = 1) -> list[dict]:
     """The declared baseline: fixed document order, no query relevance.
 
-    Deliberately ignores the question; kept in the comparison signature so
-    the scoring call site is identical for both sides."""
+    Deliberately ignores the question; the question parameter is omitted so
+    both sides are scored against the identical result shape."""
     results = []
     for entry in manifest["revisions"]:
         with open(os.path.join(DATASET_DIR, os.path.basename(entry["file"])), encoding="utf-8") as handle:

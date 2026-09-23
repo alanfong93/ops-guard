@@ -159,8 +159,11 @@ def test_malformed_authorizations_are_rejected() -> None:
     for mutation in (
         {"authorization_id": " "},
         {"script_sha256": "short"},
+        {"script_sha256": "g" * 64},
         {"runbook_revision_hash": None},
         {"arguments": [{"not": "a mapping"}]},
+        {"arguments": {"n": float("nan")}},
+        {"arguments": {1: "non-string-key"}},
         {"preconditions": "not-a-list"},
         {"unexpected": True},
     ):
@@ -170,6 +173,96 @@ def test_malformed_authorizations_are_rejected() -> None:
             parse_authorization(broken)
     with pytest.raises(MalformedAuthorizationError):
         parse_authorization({k: v for k, v in base.items() if k != "preconditions"})
+
+
+def test_stored_script_sha256_is_the_validated_one() -> None:
+    """Pins the script_sha256 snapshot: a Mapping returning a clean hash on
+    the validation read and a hostile hash on the store read must store the
+    validated value."""
+    from collections.abc import Mapping as MappingABC
+
+    class ShiftingHashMapping(MappingABC):
+        def __init__(self, inner: dict) -> None:
+            self._inner = dict(inner)
+            self.reads = 0
+
+        def __getitem__(self, key):
+            self.reads += 1
+            if key == "script_sha256" and self.reads > 1:
+                return "b" * 64
+            return self._inner[key]
+
+        def __iter__(self):
+            return iter(self._inner)
+
+        def __len__(self):
+            return len(self._inner)
+
+    authorization = parse_authorization(authorization_document(
+        arguments=ShiftingHashMapping({"service": "n8n"})
+    ))
+    assert authorization.script_sha256 == "a" * 64
+
+
+def test_nested_post_parse_mutation_cannot_change_stored_arguments() -> None:
+    """Pins the deep freeze: the stored arguments are decoupled from the
+    caller's document containers."""
+    document = authorization_document(arguments={"tags": ["a"]})
+    document["arguments"]["tags"] = source_tags = ["a"]
+    authorization = parse_authorization(document)
+    invocation = make_invocation(arguments={"tags": ["a", "b"]})
+    assert not match(authorization, invocation, SCRIPT).matched
+    source_tags.append("b")
+    assert not match(authorization, invocation, SCRIPT).matched  # unchanged
+    from ops_guard.invocation import canonicalize_json
+
+    assert canonicalize_json(dict(authorization.arguments)) == canonicalize_json({"tags": ["a"]})
+
+
+def test_stored_arguments_are_the_validated_snapshot() -> None:
+    """Pins the single-snapshot parse: a Mapping that returns clean values
+    during validation but hostile values afterwards must store the clean
+    values it validated — never the hostile ones."""
+    from collections.abc import Mapping as MappingABC
+
+    class ShiftingMapping(MappingABC):
+        def __init__(self, inner: dict) -> None:
+            self._inner = dict(inner)
+            self.reads = 0
+
+        def __getitem__(self, key):
+            self.reads += 1
+            if self.reads > 2:
+                return 10**400
+            return self._inner[key]
+
+        def __iter__(self):
+            return iter(self._inner)
+
+        def __len__(self):
+            return len(self._inner)
+
+    authorization = parse_authorization(authorization_document(
+        arguments=ShiftingMapping({"service": "n8n"})
+    ))
+    # The stored record canonicalizes cleanly and matches the clean values.
+    assert authorization.canonical_arguments() == b'{"service":"n8n"}'
+    invocation = make_invocation(arguments={"service": "n8n"})
+    assert match(authorization, invocation, SCRIPT).matched
+
+
+def test_match_never_raises_on_hostile_invocation_values() -> None:
+    """ADR 0004 rule 2: one result object reports matched or not. Hostile
+    values that cannot canonicalize report no-match instead of raising."""
+    authorization = parse_authorization(authorization_document())
+    for hostile in (
+        make_invocation(arguments={"n": float("inf")}),
+        make_invocation(arguments={"n": 10**400}),
+        make_invocation(arguments={"nested": {"deep": [1, {"deeper": [2]}] * 500}}),
+    ):
+        result = match(authorization, hostile, SCRIPT)
+        assert result.matched is False
+        assert result.reason
 
 
 def test_partial_arguments_never_match_a_complete_rule() -> None:

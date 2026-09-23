@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+import json
+
 from ops_guard.errors import ProposalError
 from ops_guard.invocation import Invocation, canonicalize_json, ensure_json_representable
 
@@ -92,13 +94,24 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
     arguments = document.get("arguments")
     if not isinstance(arguments, Mapping):
         raise MalformedAuthorizationError("arguments must be a mapping")
+    # One snapshot, deep-frozen through the canonical serialization: the
+    # frozen values are validated and stored, so a hostile or mutating
+    # Mapping cannot pass validation with different values than the record
+    # will carry — including nested containers.
+    arguments = document.get("arguments")
+    if not isinstance(arguments, Mapping):
+        raise MalformedAuthorizationError("arguments must be a mapping")
+    arguments = dict(arguments)
     try:
-        # A permitted invocation must be exactly representable under the
-        # same freeze contract as real invocations, and must canonicalize —
-        # otherwise the rule could collide with a neighbouring literal or
-        # crash the matcher.
-        ensure_json_representable(dict(arguments))
-        canonicalize_json(dict(arguments))
+        # Raw-side guard: a literal the freeze contract cannot represent
+        # exactly (ADR 0004) is malformed, not silently rounded.
+        ensure_json_representable(arguments)
+        # Freeze, then validate exactly the frozen values that get stored —
+        # a hostile dual-read container cannot pass validation with values
+        # the record does not carry — and confirm the freeze is idempotent.
+        arguments = json.loads(canonicalize_json(arguments))
+        ensure_json_representable(arguments)
+        canonicalize_json(arguments)
     except (TypeError, ValueError, AttributeError, UnicodeEncodeError,
             RecursionError, OverflowError) as error:
         raise MalformedAuthorizationError(
@@ -122,7 +135,7 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
     return StandingAuthorization(
         authorization_id=strings["authorization_id"],
         script_path=strings["script_path"],
-        script_sha256=document["script_sha256"],
+        script_sha256=script_sha256,
         action=strings["action"],
         target=strings["target"],
         arguments=dict(arguments),
@@ -147,19 +160,31 @@ def match(
     if not isinstance(invocation, Invocation):
         raise MalformedAuthorizationError("an invocation is required for matching")
 
+    try:
+        arguments_equal = (
+            canonicalize_json(dict(invocation.arguments))
+            == authorization.canonical_arguments()
+        )
+        preconditions_equal = (
+            canonicalize_json(list(invocation.preconditions))
+            == authorization.canonical_preconditions()
+        )
+    except (TypeError, ValueError, AttributeError, UnicodeEncodeError,
+            RecursionError, OverflowError) as error:
+        # ADR 0004 rule 2: the match reports matched or not. A side that
+        # cannot be canonicalized under the freeze contract never matches.
+        return MatchResult(
+            matched=False,
+            authorization_id=authorization.authorization_id,
+            reason=f"canonicalization failed on one side: {error}",
+        )
     checks = (
         ("script_path", script.path == authorization.script_path),
         ("script_sha256", hmac_eq(script.sha256, authorization.script_sha256)),
         ("action", invocation.action == authorization.action),
         ("target", invocation.target == authorization.target),
-        (
-            "arguments",
-            canonicalize_json(dict(invocation.arguments)) == authorization.canonical_arguments(),
-        ),
-        (
-            "preconditions",
-            canonicalize_json(list(invocation.preconditions)) == authorization.canonical_preconditions(),
-        ),
+        ("arguments", arguments_equal),
+        ("preconditions", preconditions_equal),
         (
             "runbook_revision_hash",
             hmac_eq(invocation.runbook_revision_hash, authorization.runbook_revision_hash),

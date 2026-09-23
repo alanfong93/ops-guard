@@ -12,7 +12,9 @@ flowchart TD
     EVIDENCE -->|"No"| REFUSE["Refuse execution and record reason"]
     EVIDENCE -->|"Yes"| PRECONDITIONS{"Preconditions met?"}
     PRECONDITIONS -->|"No"| REFUSE
-    PRECONDITIONS -->|"Yes"| AUTH{"Standing authorization applies?"}
+    PRECONDITIONS -->|"Yes"| TOKEN{"One-time token valid?"}
+    TOKEN -->|"Unknown, expired, or reused"| REFUSE
+    TOKEN -->|"Yes"| AUTH{"Standing authorization applies?"}
     AUTH -->|"Yes"| AUDIT{"Audit record available?"}
     AUTH -->|"No"| APPROVAL{"Genuine proposal-bound approval?"}
     APPROVAL -->|"No or expired"| REFUSE

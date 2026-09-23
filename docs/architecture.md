@@ -36,9 +36,10 @@ erDiagram
     RUNBOOK_REVISION {
         string runbook_id
         string revision
-        string content_hash "SHA-256 of canonical body - changed hash voids citations"
+        string content_hash "SHA-256 of literal canonical body - changed hash voids citations"
         string operation_action
         string operation_target
+        string preconditions "JSON name/expected pairs"
         string verification_verifier
         datetime verification_verified_at
         string applicability

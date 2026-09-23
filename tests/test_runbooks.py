@@ -160,3 +160,85 @@ def test_verification_timestamp_must_be_aware() -> None:
     document2["content_hash"] = hashlib.sha256(canonicalize_json(body)).hexdigest()
     with pytest.raises(UnverifiedRunbookError):
         parse_revision(document2)
+
+
+def _rehash(document: dict) -> dict:
+    from ops_guard.invocation import canonicalize_json
+    import hashlib
+
+    out = dict(document)
+    body = {k: v for k, v in out.items() if k != "content_hash"}
+    out["content_hash"] = hashlib.sha256(canonicalize_json(body)).hexdigest()
+    return out
+
+
+def test_duplicate_locators_are_malformed() -> None:
+    document = load("valid-n8n-restart.json")
+    document["passages"].append(dict(document["passages"][0]))
+    with pytest.raises(MalformedRunbookError):
+        parse_revision(_rehash(document))
+
+
+def test_empty_preconditions_are_contract_sanctioned() -> None:
+    document = load("valid-n8n-restart.json")
+    document["preconditions"] = []
+    document = _rehash(document)
+    cited = resolve_citation(document, citation_for(document))
+    assert cited.preconditions == ()
+
+
+def test_revision_label_mismatch_is_rejected() -> None:
+    document = load("valid-n8n-restart.json")
+    with pytest.raises(MalformedRunbookError):
+        resolve_citation(document, Citation(
+            runbook_id=document["runbook_id"],
+            revision="2026-09-22.1",
+            content_hash=document["content_hash"],
+            locator="restart/steps",
+        ))
+
+
+def test_literal_document_hashing() -> None:
+    from ops_guard.invocation import canonicalize_json
+    import hashlib
+
+    document = load("valid-n8n-restart.json")
+    # An RFC3339 Z-spelled document hashed over its literal bytes validates.
+    z_form = _rehash({**document, "verification": {
+        "verifier": "alan",
+        "verified_at": "2026-09-23T09:00:00Z",
+        "applicability": "alan's self-hosted docker host",
+    }})
+    cited = resolve_citation(z_form, citation_for(z_form))
+    assert cited.verifier == "alan"
+    # Respelling the same instant changes the literal bytes, so the old
+    # citation hash no longer matches — identity is over the literal doc.
+    respelled = dict(z_form)
+    respelled["verification"] = {
+        "verifier": "alan",
+        "verified_at": "2026-09-23T09:00:00.000000+00:00",
+        "applicability": "alan's self-hosted docker host",
+    }
+    stale = citation_for(z_form)
+    with pytest.raises(TamperedRunbookError):
+        resolve_citation(respelled, stale)
+    # And the hash always covers the literal stored document: rehashing the
+    # respelled document yields a new hash, distinct from the Z-form one.
+    rehashed = _rehash(respelled)
+    body = {k: v for k, v in rehashed.items() if k != "content_hash"}
+    assert rehashed["content_hash"] == hashlib.sha256(canonicalize_json(body)).hexdigest()
+    assert rehashed["content_hash"] != z_form["content_hash"]
+
+
+def test_malformed_content_hash_is_typed() -> None:
+    document = load("valid-n8n-restart.json")
+    for bad in ("é" * 64, "0" * 63, "g" * 64, ""):
+        with pytest.raises(MalformedRunbookError):
+            parse_revision({**document, "content_hash": bad})
+
+
+def test_whitespace_only_fields_are_blank() -> None:
+    document = load("valid-n8n-restart.json")
+    document["verification"]["verifier"] = "   "
+    with pytest.raises(UnverifiedRunbookError):
+        parse_revision(_rehash(document))

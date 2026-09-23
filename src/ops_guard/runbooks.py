@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
 from ops_guard.errors import ProposalError
 from ops_guard.invocation import canonicalize_json
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class MalformedRunbookError(ProposalError):
@@ -42,15 +45,15 @@ def _aware(moment: datetime) -> datetime:
 
 def _require_str(document: Mapping, key: str) -> str:
     value = document.get(key)
-    if not isinstance(value, str) or not value:
-        raise MalformedRunbookError(f"{key} must be a non-empty string")
+    if not isinstance(value, str) or not value.strip():
+        raise MalformedRunbookError(f"{key} must be a non-blank string")
     return value
 
 
 def _require_str_in(mapping: Mapping, key: str, where: str) -> str:
     value = mapping.get(key)
-    if not isinstance(value, str) or not value:
-        raise MalformedRunbookError(f"{where}.{key} must be a non-empty string")
+    if not isinstance(value, str) or not value.strip():
+        raise MalformedRunbookError(f"{where}.{key} must be a non-blank string")
     return value
 
 
@@ -77,32 +80,15 @@ class RunbookRevision:
     passages: tuple[Passage, ...]
     verification: Verification
     content_hash: str
-
-    @property
-    def body(self) -> dict[str, Any]:
-        """The revision document without the content-hash key (hash input)."""
-        return {
-            "runbook_id": self.runbook_id,
-            "revision": self.revision,
-            "operation": {"action": self.operation_action, "target": self.operation_target},
-            "preconditions": list(self.preconditions),
-            "passages": [{"locator": p.locator, "text": p.text} for p in self.passages],
-            "verification": {
-                "verifier": self.verification.verifier,
-                "verified_at": format_verified_at(self.verification.verified_at),
-                "applicability": self.verification.applicability,
-            },
-        }
+    body: dict
 
     def canonical_bytes(self) -> bytes:
+        """JCS canonicalization of the literal stored document minus the
+        content-hash key — exactly what the contract hashes."""
         return canonicalize_json(self.body)
 
     def expected_content_hash(self) -> str:
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
-
-
-def format_verified_at(moment: datetime) -> str:
-    return moment.isoformat(timespec="microseconds")
 
 
 def _parse_passages(raw: Any) -> tuple[Passage, ...]:
@@ -146,8 +132,8 @@ def _parse_verification(raw: Any) -> Verification:
 
     def verified_string(key: str) -> str:
         value = raw.get(key)
-        if not isinstance(value, str) or not value:
-            raise UnverifiedRunbookError(f"verification.{key} must be a non-empty string")
+        if not isinstance(value, str) or not value.strip():
+            raise UnverifiedRunbookError(f"verification.{key} must be a non-blank string")
         return value
 
     verifier = verified_string("verifier")
@@ -167,13 +153,20 @@ def _parse_verification(raw: Any) -> Verification:
 
 
 def parse_revision(document: Mapping) -> RunbookRevision:
-    """Parse and validate a revision document; content hash must recompute."""
+    """Parse and validate a revision document; content hash must recompute.
+
+    The hash is over the **literal stored document** minus the content-hash
+    key (JCS canonicalization): timestamp spelling and every other byte of
+    semantic content is significant, exactly as docs/runbook-format.md
+    specifies.
+    """
     if not isinstance(document, Mapping):
         raise MalformedRunbookError("revision must be a JSON object")
-    if set(document) != {
+    expected_keys = {
         "runbook_id", "revision", "operation", "preconditions",
         "passages", "verification", "content_hash",
-    }:
+    }
+    if set(document) != expected_keys:
         missing = {"verification"} - set(document)
         if missing:
             raise UnverifiedRunbookError(
@@ -184,6 +177,9 @@ def parse_revision(document: Mapping) -> RunbookRevision:
     if not isinstance(operation, Mapping) or set(operation) != {"action", "target"}:
         raise MalformedRunbookError("operation must have exactly action and target")
     content_hash = _require_str(document, "content_hash")
+    if not _HEX64.fullmatch(content_hash):
+        raise MalformedRunbookError("content_hash must be 64 hexadecimal characters")
+    literal_body = {key: value for key, value in document.items() if key != "content_hash"}
     revision = RunbookRevision(
         runbook_id=_require_str(document, "runbook_id"),
         revision=_require_str(document, "revision"),
@@ -193,6 +189,7 @@ def parse_revision(document: Mapping) -> RunbookRevision:
         passages=_parse_passages(document.get("passages")),
         verification=_parse_verification(document.get("verification")),
         content_hash=content_hash,
+        body=literal_body,
     )
     if not hmac.compare_digest(revision.expected_content_hash(), content_hash):
         raise TamperedRunbookError("content hash does not match the revision body")

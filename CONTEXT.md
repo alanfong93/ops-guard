@@ -4,6 +4,27 @@ The authoritative glossary for ops-guard terms. Product terms derive from `docs/
 
 ## Terms
 
+### Human-verified runbook
+A runbook revision whose verification metadata names the operator who reviewed it and when; only such revisions are sources of procedural evidence. Authority: [runbook format](docs/runbook-format.md). Rejected alias: **"trusted doc"** — trust attaches to the verified revision and its content hash, not to a document.
+
+### Required procedural evidence
+A cited passage from a human-verified runbook revision, bound to an unchanged content hash, that identifies the intended operation and its preconditions. Without it, fresh approval alone is not enough to execute. Authority: [runbook format](docs/runbook-format.md); constraint: `docs/PRODUCT.md` ("Return cited runbook guidance; absent required procedural evidence, refuse execution"). Rejected alias: **"context"** — retrieved text that does not resolve as a citation is context, never evidence.
+
+### Standing authorization
+An operator-authored record of the complete permitted invocation — verified script identity, action, target, typed arguments, preconditions, runbook revision hash — matched as exact equality. Matching invocations may run unattended. Authority: [ADR 0004](docs/adr/0004-exact-standing-authorization.md). Rejected alias: **"auto-approve rule"** — nothing is auto-approved; a matching invocation has already been individually authorized by the operator's record.
+
+### Complete permitted invocation
+The exact invocation a standing authorization declares: every field mandatory, no wildcards, no partial matches, sequence order significant. Authority: [ADR 0004](docs/adr/0004-exact-standing-authorization.md). Rejected alias: **"profile"** — a profile implies a set of acceptable invocations; a standing authorization permits exactly one.
+
+### Judge advisory signal
+An estimate attached to a judge risk assessment. Its meaning and derivation are recorded with the audit event; it never grants, withdraws, or substitutes for authorization, and judge unavailability does not grant authorization. Authority: `docs/PRODUCT.md`. Rejected alias: **"safety score"** — the signal is not a safety guarantee and must never read as one.
+
+### Observed outcome
+The execution result recorded after the operation: success, failure, or an explicitly unknown completion when the result cannot be confirmed. Authority: [execution demonstration](docs/execution-demonstration.md); constraint: `docs/PRODUCT.md`. Rejected alias: **"result"** unqualified — an unconfirmed completion must be recorded as unknown, not silently treated as success.
+
+### Audit record
+One append-only, versioned event: gapless sequence, event id, timestamp, references, redacted payload, and outcome or failure code. Required records must persist or execution is refused. Authority: the audit contract in `src/ops_guard/audit.py`. Rejected alias: **"log entry"** — audit records are structured, sequenced, and required-for-execution, not free-form lines.
+
 ### Frozen proposal
 An immutable persisted record of one canonical invocation and its one-time token binding. It is created once, is never edited, and a correction is a new proposal. Authority: [ADR 0002](docs/adr/0002-frozen-invocation-audit-contract.md). Rejected alias: **"pending fix"** — a proposal changes nothing and authorizes nothing; "fix" implies both.
 

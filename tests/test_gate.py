@@ -41,7 +41,7 @@ def base_authorization() -> StandingAuthorization:
         "target": "n8n",
         "arguments": {"service": "n8n", "timeout_seconds": 30},
         "preconditions": [{"name": "healthcheck", "expected": "passing"}],
-        "runbook_revision_hash": "b" * 64,
+        "runbook_revision_hash": VALID_RUNBOOK["content_hash"],
     })
 
 
@@ -84,6 +84,7 @@ class Harness:
         self.executor_calls: list[Invocation] = []
 
     def issue(self, **overrides) -> object:
+        overrides.setdefault("runbook_revision_hash", VALID_RUNBOOK["content_hash"])
         invocation = make_invocation(**overrides)
         issued = self.service.open_proposal(invocation, ttl=timedelta(minutes=10))
         return issued
@@ -247,10 +248,32 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
 
         def failing_append_on(conn, event_type, **kwargs):
             if event_type == "execution_start":
-                raise __import__("ops_guard").AuditWriteFailure("audit store unavailable")
+                raise AuditWriteFailure("audit store unavailable")
             return original_append_on(conn, event_type, **kwargs)
 
         harness.audit.append_on = failing_append_on  # type: ignore[method-assign]
+    elif mutation == "mismatched-expected-digest":
+        overrides["expected_digest"] = "0" * 64
+    elif mutation == "different-revision-evidence":
+        # A different, fully valid, human-verified revision - same operation,
+        # different content. The proposal froze the original revision's hash.
+        import hashlib
+
+        from ops_guard.invocation import canonicalize_json
+
+        other = json.loads(json.dumps(VALID_RUNBOOK))
+        other["revision"] = "2026-09-23.2"
+        other["passages"][0]["text"] = "a different procedure the proposal never froze"
+        body = {k: v for k, v in other.items() if k != "content_hash"}
+        other["content_hash"] = hashlib.sha256(canonicalize_json(body)).hexdigest()
+        overrides["runbook_document"] = other
+        overrides["citation"] = Citation(
+            runbook_id=other["runbook_id"],
+            revision=other["revision"],
+            content_hash=other["content_hash"],
+            locator="restart/steps",
+        )
+        overrides["standing"] = base_authorization()
 
     outcome = harness.gate.execute(make_request(**overrides), harness.executor)
 
@@ -258,12 +281,10 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
     assert outcome.refusal
     assert harness.executor_calls == []  # never dispatched
     if mutation not in ("consumed-token", "approval-replay", "unknown-token", "expired-token"):
-        # the token stays eligible — nothing was spent by a refused attempt
-        try:
-            frozen = harness.service.resolve(issued.token)
-            assert not frozen.consumed
-        except Exception:
-            pass
+        # the token stays eligible - nothing was spent by a refused attempt.
+        # A TokenAlreadyConsumedError here is real leakage: fail the test.
+        frozen = harness.service.resolve(issued.token)
+        assert not frozen.consumed
 
 
 def test_refusals_are_audit_recorded_before_any_side_effect(harness: Harness) -> None:
@@ -280,3 +301,47 @@ def test_expired_token_refusal(harness: Harness) -> None:
     harness.clock.advance(11 * 60)
     outcome = harness.gate.execute(make_request(token=issued.token), harness.executor)
     assert not outcome.dispatched and "expired" in outcome.refusal
+
+
+def test_standing_dispatch_spends_a_recorded_approval(harness: Harness) -> None:
+    """ADR 0003 rule 4: spent exactly when the token is consumed — the
+    standing path must not strand a recorded approval in 'recorded'."""
+    issued = harness.issue()
+    harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    outcome = harness.gate.execute(make_request(token=issued.token), harness.executor)
+    assert outcome.dispatched and outcome.authorization_path == "standing"
+    conn = __import__("sqlite3").connect(harness.service.store._path)
+    try:
+        state = conn.execute(
+            "SELECT state FROM approvals WHERE token_digest = ?",
+            (harness.service.token_digest(issued.token),),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert state == "used"
+
+
+def test_garbage_executor_report_is_recorded_as_failure(harness: Harness) -> None:
+    issued = harness.issue()
+
+    def liar(invocation: Invocation) -> str:
+        harness.executor_calls.append(invocation)
+        return "excellent"
+
+    with pytest.raises(ValueError):
+        harness.gate.execute(make_request(token=issued.token), liar)
+    failure = [e for e in harness.audit.events() if e.event_type == "execution_outcome"]
+    assert failure and failure[-1].outcome == "failure"
+
+
+def test_base_exception_from_executor_still_records_failure(harness: Harness) -> None:
+    issued = harness.issue()
+
+    def exits(invocation: Invocation) -> str:
+        harness.executor_calls.append(invocation)
+        raise SystemExit(3)
+
+    with pytest.raises(SystemExit):
+        harness.gate.execute(make_request(token=issued.token), exits)
+    failure = [e for e in harness.audit.events() if e.event_type == "execution_outcome"]
+    assert failure and failure[-1].outcome == "failure"

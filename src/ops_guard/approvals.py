@@ -296,3 +296,31 @@ class ApprovalVerifier:
                 raise ApprovalReplayedError("approval was already spent")
 
         return append
+
+    def spend_approval_append(self, token: str) -> AuditAppend:
+        """Gate seam: spend a recorded approval if one exists, inside the
+        consume transaction.
+
+        A standing-authorization dispatch needs no approval, but a proposal
+        whose token is consumed must never leave a recorded approval behind
+        (ADR 0003 rule 4: spent exactly when the token is consumed). Absent
+        approval: no-op. Already used: replay, fails the transaction.
+        """
+        token_digest = self._proposals.token_digest(token)
+
+        def append(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                "SELECT state FROM proposals WHERE token_digest = ?", (token_digest,)
+            ).fetchone()
+            if row is None or row["state"] != "consumed":
+                raise ApprovalError(
+                    "approval flip must join the consumption of its own proposal"
+                )
+            if ApprovalStore.fetch_on(conn, token_digest) is None:
+                return  # standing path: no approval exists to spend
+            if not ApprovalStore.mark_used_on(
+                conn, token_digest, format_timestamp(self._now())
+            ):
+                raise ApprovalReplayedError("approval was already spent")
+
+        return append

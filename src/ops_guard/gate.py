@@ -92,12 +92,12 @@ class ExecutionGate:
         """
         proposal_id: str | None = None
 
-        def refuse(reason: str) -> GateOutcome:
+        def refuse(reason: str, *, digest: str | None = None) -> GateOutcome:
             self._audit.append(
                 "refusal",
                 payload={"reason": reason, "gate": "execution"},
                 proposal_ref=proposal_id,
-                invocation_digest=request.expected_digest,
+                invocation_digest=digest or request.expected_digest,
             )
             return GateOutcome(
                 dispatched=False,
@@ -108,7 +108,9 @@ class ExecutionGate:
             )
 
         # 1. Evidence: the cited passage must resolve against an intact,
-        #    human-verified revision.
+        #    human-verified revision. A refusal-append failure here escapes
+        #    as AuditWriteFailure — fail-closed by design (the audit store
+        #    being down must not look like a clean refusal).
         try:
             evidence = resolve_citation(request.runbook_document, request.citation)
         except (MalformedRunbookError, UnverifiedRunbookError, TamperedRunbookError, UnknownPassageError) as error:
@@ -127,37 +129,51 @@ class ExecutionGate:
             return refuse(f"token rejected: {error}")
         proposal_id = frozen.proposal_id
 
-        # 3. The frozen invocation must be the one the evidence describes.
+        # 3. The frozen invocation must be the one the evidence describes —
+        #    including the runbook revision binding (runbook-format.md: the
+        #    gate binds proposals to the revision content hash).
         if (
             frozen.invocation.action != evidence.operation_action
             or frozen.invocation.target != evidence.operation_target
+            or frozen.invocation.runbook_revision_hash != request.citation.content_hash
             or canonicalize_json(list(frozen.invocation.preconditions))
             != canonicalize_json([dict(p) for p in evidence.preconditions])
         ):
-            return refuse("evidence does not describe the frozen invocation")
+            return refuse(
+                "evidence does not describe the frozen invocation",
+                digest=frozen.invocation_digest,
+            )
 
         # 4. Preconditions must be observed as the frozen invocation requires.
         for precondition in frozen.invocation.preconditions:
             observed = request.observed_preconditions.get(precondition["name"])
             if observed is None:
                 return refuse(
-                    f"precondition {precondition['name']!r} was not observed"
+                    f"precondition {precondition['name']!r} was not observed",
+                    digest=frozen.invocation_digest,
                 )
             if observed != precondition["expected"]:
                 return refuse(
                     f"precondition {precondition['name']!r} is "
-                    f"{observed!r}, required {precondition['expected']!r}"
+                    f"{observed!r}, required {precondition['expected']!r}",
+                    digest=frozen.invocation_digest,
                 )
 
         # 5. Exactly one valid authorization path: standing match, else
-        #    proposal-bound approval.
+        #    proposal-bound approval. On the approval path, request.script is
+        #    recorded as supplied — the MCP layer (#16) must resolve and
+        #    verify the script actually executed against it.
         path: str | None = None
         refusal_bits: list[str] = []
         if request.standing is not None:
-            standing_result = match(request.standing, frozen.invocation, request.script)
-            if standing_result.matched:
+            try:
+                standing_result = match(request.standing, frozen.invocation, request.script)
+            except ProposalError as error:
+                standing_result = None
+                refusal_bits.append(f"standing: {error}")
+            if standing_result is not None and standing_result.matched:
                 path = "standing"
-            else:
+            elif standing_result is not None:
                 refusal_bits.append(f"standing: {standing_result.reason}")
         if path is None:
             try:
@@ -168,11 +184,16 @@ class ExecutionGate:
             except (UnknownTokenError, TokenExpiredError, TokenAlreadyConsumedError) as error:
                 refusal_bits.append(f"approval: {error}")
         if path is None:
-            return refuse("no authorization path: " + "; ".join(refusal_bits))
+            return refuse(
+                "no authorization path: " + "; ".join(refusal_bits),
+                digest=frozen.invocation_digest,
+            )
 
         # 6. Dispatch atomically: consume the token, append the
-        #    execution-start audit record, and (proposal-bound path) spend
-        #    the approval — one durable transaction.
+        #    execution-start audit record, and spend any recorded approval —
+        #    one durable transaction. Spending is conditional: the standing
+        #    path with no recorded approval leaves nothing to flip, while a
+        #    used approval still fails the transaction (replay).
         callbacks: list[AuditAppend] = [
             lambda conn: self._audit.append_on(
                 conn,
@@ -185,12 +206,15 @@ class ExecutionGate:
                 correlation_id=frozen.proposal_id,
                 proposal_ref=frozen.proposal_id,
                 invocation_digest=frozen.invocation_digest,
-                evidence_refs=[request.citation.locator],
+                evidence_refs=[
+                    f"{request.citation.runbook_id}@{request.citation.revision}",
+                    request.citation.content_hash,
+                    request.citation.locator,
+                ],
                 authorization_path=path,
-            )
+            ),
+            self._approvals.spend_approval_append(request.token),
         ]
-        if path == "proposal-bound":
-            callbacks.append(self._approvals.mark_used_append(request.token))
 
         def composed(conn: sqlite3.Connection) -> None:
             for callback in callbacks:
@@ -205,17 +229,19 @@ class ExecutionGate:
         except (ProposalError, ApprovalError, AuditWriteFailure) as error:
             return refuse(f"dispatch refused: {error}")
 
-        # 7. Side effect, then the outcome record.
+        # 7. Side effect, then the outcome record. A BaseException (e.g.
+        #    SystemExit) is recorded as a failure before it propagates so the
+        #    execution never ends without an outcome attempt.
         try:
             reported = executor(consumed.invocation)
             if reported not in _OUTCOMES:
                 raise ValueError(
                     f"executor must report success or unknown, got {reported!r}"
                 )
-        except Exception as error:  # noqa: BLE001 - failure is an outcome
+        except BaseException as error:  # noqa: BLE001 - failure is an outcome
             self._audit.append(
                 "execution_outcome",
-                payload={"outcome": "failure", "error": str(error)},
+                payload={"outcome": "failure", "error": f"{type(error).__name__}: {error}"},
                 correlation_id=frozen.proposal_id,
                 proposal_ref=frozen.proposal_id,
                 invocation_digest=frozen.invocation_digest,

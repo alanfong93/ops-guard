@@ -21,3 +21,9 @@ One append-only, versioned envelope recording an operational occurrence: gapless
 
 ### Keyed fingerprint
 The truncated keyed HMAC persisted in place of a redacted sensitive value so the same value can be recognized later without being revealed. It is keyed with the operator's persistent audit key. Authority: the audit contract in `src/ops_guard/audit.py`. Rejected alias: **"token fingerprint"** — that phrase is reserved for the rejected idea that a token digest is an invocation identity (see Canonical invocation identity); a keyed fingerprint redacts a value and never identifies an invocation.
+
+### Runbook revision
+The immutable, human-verified unit of procedural evidence: one operation, its preconditions, its passages, and verification metadata, identified by a content hash that must recompute exactly. Authority: [runbook format](docs/runbook-format.md). Rejected alias: **"the runbook"** — loose speech for a living document; only an immutable revision can back a citation.
+
+### Citation
+A reference binding one passage locator to one runbook revision content hash. It qualifies as required procedural evidence only when the revision is verified and unchanged. Authority: [runbook format](docs/runbook-format.md). Rejected alias: **"quote"** — a quotation without revision binding drifts when the document changes and is not evidence.

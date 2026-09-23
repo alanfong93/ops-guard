@@ -1,0 +1,25 @@
+{
+  "runbook_id": "n8n-restart",
+  "revision": "2026-09-23.1",
+  "operation": {
+    "action": "restart",
+    "target": "n8n"
+  },
+  "preconditions": [
+    {
+      "name": "healthcheck",
+      "expected": "passing"
+    }
+  ],
+  "passages": [
+    {
+      "locator": "restart/steps",
+      "text": "cd ~/stack && docker compose restart n8n, then poll /healthz until it returns 200."
+    },
+    {
+      "locator": "restart/verify",
+      "text": "docker compose ps must show n8n 'running' before declaring success."
+    }
+  ],
+  "content_hash": "b803988ae81fdd058746f4f12662cce5689127a7dd33005a07b0291293c6e001"
+}

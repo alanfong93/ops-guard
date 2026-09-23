@@ -19,6 +19,7 @@ from datetime import datetime
 
 from ops_guard.errors import (
     ApprovalAlreadyRecordedError,
+    ApprovalError,
     ApprovalOperatorMismatchError,
     ApprovalReplayedError,
     HostSuppliedApprovalError,
@@ -31,6 +32,7 @@ _APPROVAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS approvals (
     approval_id            TEXT PRIMARY KEY,
     token_digest           TEXT NOT NULL UNIQUE,
+    proposal_id            TEXT NOT NULL,
     operator_identity      TEXT NOT NULL,
     invocation_digest      TEXT NOT NULL,
     runbook_revision_hash  TEXT NOT NULL,
@@ -50,10 +52,17 @@ def _connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+def _aware(moment: datetime) -> datetime:
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError("clock must return timezone-aware datetimes")
+    return moment
+
+
 @dataclass(frozen=True)
 class ApprovalRecord:
     approval_id: str
     token_digest: str
+    proposal_id: str
     operator_identity: str
     invocation_digest: str
     runbook_revision_hash: str
@@ -98,6 +107,7 @@ class ApprovalStore:
         *,
         approval_id: str,
         token_digest: str,
+        proposal_id: str,
         operator_identity: str,
         invocation_digest: str,
         runbook_revision_hash: str,
@@ -107,13 +117,15 @@ class ApprovalStore:
         conn.execute(
             """
             INSERT INTO approvals (
-                approval_id, token_digest, operator_identity, invocation_digest,
-                runbook_revision_hash, expires_at, created_at, state, used_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'recorded', NULL)
+                approval_id, token_digest, proposal_id, operator_identity,
+                invocation_digest, runbook_revision_hash, expires_at,
+                created_at, state, used_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', NULL)
             """,
             (
                 approval_id,
                 token_digest,
+                proposal_id,
                 operator_identity,
                 invocation_digest,
                 runbook_revision_hash,
@@ -153,10 +165,17 @@ class ApprovalVerifier:
     ) -> None:
         if not operator_identity:
             raise ValueError("operator_identity must be a non-empty configured identity")
+        if store._path != proposals.store._path:
+            raise ValueError(
+                "ApprovalStore and the proposal service must share one database"
+            )
         self._store = store
         self._proposals = proposals
         self._operator_identity = operator_identity
         self._clock = clock
+
+    def _now(self) -> datetime:
+        return _aware(self._clock())
 
     def _identity_matches(self, presented: str) -> bool:
         return hmac.compare_digest(
@@ -177,10 +196,11 @@ class ApprovalVerifier:
             )
         frozen = self._proposals.resolve(token)
         token_digest = self._proposals.token_digest(token)
-        now = self._clock()
+        now = self._now()
         record = ApprovalRecord(
             approval_id=uuid.uuid4().hex,
             token_digest=token_digest,
+            proposal_id=frozen.proposal_id,
             operator_identity=self._operator_identity,
             invocation_digest=frozen.invocation_digest,
             runbook_revision_hash=frozen.invocation.runbook_revision_hash,
@@ -194,6 +214,7 @@ class ApprovalVerifier:
                     conn,
                     approval_id=record.approval_id,
                     token_digest=record.token_digest,
+                    proposal_id=record.proposal_id,
                     operator_identity=record.operator_identity,
                     invocation_digest=record.invocation_digest,
                     runbook_revision_hash=record.runbook_revision_hash,
@@ -207,10 +228,18 @@ class ApprovalVerifier:
         return record
 
     def verify(self, token: str, *, operator_identity: str) -> ApprovalDecision:
-        """Read-only check of a proposal-bound approval (ADR 0003, rule 6)."""
+        """Read-only check of a proposal-bound approval (ADR 0003, rule 6).
+
+        Rejection order: the operator-identity gate runs first — an
+        unauthenticated caller gets no oracle over approval existence — then
+        host-supplied, stored-operator mismatch (tamper), replayed, the
+        proposal-lifecycle rejections, and the binding re-check.
+        """
         token_digest = self._proposals.token_digest(token)
         if not self._identity_matches(operator_identity):
-            raise ApprovalOperatorMismatchError("operator identity is not configured")
+            raise ApprovalOperatorMismatchError(
+                "presented operator identity does not match the configured operator"
+            )
         with self._proposals.store.read() as conn:
             row = ApprovalStore.fetch_on(conn, token_digest)
             if row is None:
@@ -225,7 +254,8 @@ class ApprovalVerifier:
                 raise ApprovalReplayedError("approval was already spent")
         frozen = self._proposals.resolve(token)  # typed unknown/consumed/expired
         if (
-            frozen.invocation_digest != row["invocation_digest"]
+            frozen.proposal_id != row["proposal_id"]
+            or frozen.invocation_digest != row["invocation_digest"]
             or frozen.invocation.runbook_revision_hash != row["runbook_revision_hash"]
             or format_timestamp(frozen.expires_at) != row["expires_at"]
         ):
@@ -245,13 +275,23 @@ class ApprovalVerifier:
 
         Pass the returned callable as ``ProposalService.consume``'s
         ``same_transaction`` so the approval flip commits or rolls back with
-        the token consumption (ADR 0002 rule 6 + ADR 0003 rule 4).
+        the token consumption (ADR 0002 rule 6 + ADR 0003 rule 4). The flip
+        re-checks inside the transaction that its own proposal is the one
+        transitioning; wiring this callback to a different token's consume
+        fails closed and rolls the whole unit back.
         """
         token_digest = self._proposals.token_digest(token)
 
         def append(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                "SELECT state FROM proposals WHERE token_digest = ?", (token_digest,)
+            ).fetchone()
+            if row is None or row["state"] != "consumed":
+                raise ApprovalError(
+                    "approval flip must join the consumption of its own proposal"
+                )
             if not ApprovalStore.mark_used_on(
-                conn, token_digest, format_timestamp(self._clock())
+                conn, token_digest, format_timestamp(self._now())
             ):
                 raise ApprovalReplayedError("approval was already spent")
 

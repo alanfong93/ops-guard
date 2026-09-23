@@ -44,11 +44,14 @@ erDiagram
     APPROVAL {
         string approval_id
         string token_digest "unique - one approval per proposal"
+        string proposal_id "copied from the frozen proposal"
         string operator_identity "configured operator"
         string invocation_digest "copied from the frozen proposal"
         string runbook_revision_hash "copied from the frozen proposal"
         datetime expires_at "copied from the frozen proposal"
+        datetime created_at
         string state "recorded or used"
+        datetime used_at
     }
     AUTHORIZATION {
         string type

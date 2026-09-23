@@ -129,16 +129,125 @@ def test_consumed_or_unknown_tokens_cannot_be_approved(service, verifier) -> Non
 
 
 def test_tampered_binding_fails_closed(service, verifier) -> None:
+    tamper_legs = [
+        lambda pid, digest: (
+            f"UPDATE proposals SET invocation_digest = '{'f' * 64}' WHERE proposal_id = '{pid}'",
+            InvocationMismatchError,
+        ),
+        lambda pid, digest: (
+            f"UPDATE proposals SET expires_at = '2099-01-01T00:00:00.000000+00:00' "
+            f"WHERE proposal_id = '{pid}'",
+            InvocationMismatchError,
+        ),
+        lambda pid, digest: (
+            f"UPDATE approvals SET expires_at = '2099-01-01T00:00:00.000000+00:00' "
+            f"WHERE token_digest = '{digest}'",
+            InvocationMismatchError,
+        ),
+        lambda pid, digest: (
+            f"UPDATE approvals SET invocation_digest = '{'0' * 64}' WHERE token_digest = '{digest}'",
+            InvocationMismatchError,
+        ),
+        lambda pid, digest: (
+            f"UPDATE approvals SET runbook_revision_hash = 'tampered' WHERE token_digest = '{digest}'",
+            InvocationMismatchError,
+        ),
+        lambda pid, digest: (
+            f"UPDATE approvals SET proposal_id = 'other' WHERE token_digest = '{digest}'",
+            InvocationMismatchError,
+        ),
+        lambda pid, digest: (
+            f"UPDATE approvals SET operator_identity = 'mallory' WHERE token_digest = '{digest}'",
+            ApprovalOperatorMismatchError,
+        ),
+    ]
+    for leg in tamper_legs:
+        issued, _ = _recorded(verifier, service)
+        statement, expected = leg(issued.proposal_id, service.token_digest(issued.token))
+        conn = sqlite3.connect(service.store._path)
+        cursor = conn.execute(statement)
+        changed = cursor.rowcount
+        conn.commit()
+        conn.close()
+        assert changed == 1  # the tamper must actually reach the current row
+        with pytest.raises(expected):
+            verifier.verify(issued.token, operator_identity=OPERATOR)
+        conn = sqlite3.connect(service.store._path)
+        conn.execute("DELETE FROM approvals")
+        conn.execute("DELETE FROM proposals")
+        conn.commit()
+        conn.close()
+
+
+def test_verify_rejects_consumed_proposal(service, verifier) -> None:
     issued, _ = _recorded(verifier, service)
-    conn = sqlite3.connect(service.store._path)
-    conn.execute(
-        "UPDATE proposals SET invocation_digest = ? WHERE proposal_id = ?",
-        ("f" * 64, issued.proposal_id),
-    )
-    conn.commit()
-    conn.close()
-    with pytest.raises(InvocationMismatchError):
+    service.consume(issued.token)
+    with pytest.raises(TokenAlreadyConsumedError):
         verifier.verify(issued.token, operator_identity=OPERATOR)
+
+
+def test_operator_gate_precedes_existence_oracle(service, verifier) -> None:
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    # Wrong operator + never-recorded token: the identity gate answers first.
+    with pytest.raises(ApprovalOperatorMismatchError):
+        verifier.verify(issued.token, operator_identity="mallory")
+
+
+def test_approval_cas_is_pinned_at_store_level(service, verifier) -> None:
+    issued, _ = _recorded(verifier, service)
+    digest = service.token_digest(issued.token)
+    conn = sqlite3.connect(service.store._path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        assert ApprovalStore.mark_used_on(conn, digest, "2026-09-23T00:00:00.000000+00:00")
+        assert not ApprovalStore.mark_used_on(
+            conn, digest, "2026-09-23T00:00:01.000000+00:00"
+        )
+        conn.execute("ROLLBACK")
+    finally:
+        conn.close()
+
+
+def test_flip_cannot_be_cross_wired_to_another_proposal(service, verifier) -> None:
+    first, _ = _recorded(verifier, service)
+    second = service.open_proposal(make_invocation(), ttl=timedelta(minutes=10))
+    verifier.record_approval(second.token, operator_identity=OPERATOR)
+
+    from ops_guard import ApprovalError
+
+    with pytest.raises(ApprovalError):
+        service.consume(second.token, same_transaction=verifier.mark_used_append(first.token))
+
+    # Nothing happened: second is unspent, first's approval still recorded.
+    assert not service.resolve(second.token).consumed
+    assert verifier.verify(first.token, operator_identity=OPERATOR).allowed
+
+
+def test_verifier_rejects_mismatched_store_paths(tmp_path, token_key, clock) -> None:
+    from helpers import make_service
+
+    service = make_service(tmp_path / "proposals.db", token_key=token_key, clock=clock)
+    with pytest.raises(ValueError):
+        ApprovalVerifier(
+            ApprovalStore(str(tmp_path / "elsewhere.db")),
+            service,
+            operator_identity=OPERATOR,
+            clock=clock,
+        )
+
+
+def test_verifier_rejects_naive_clock(service, tmp_path) -> None:
+    from datetime import datetime
+
+    naive = ApprovalVerifier(
+        ApprovalStore(service.store._path),
+        service,
+        operator_identity=OPERATOR,
+        clock=lambda: datetime(2026, 9, 23, 12, 0, 0),
+    )
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    with pytest.raises(ValueError):
+        naive.record_approval(issued.token, operator_identity=OPERATOR)
 
 
 def test_approval_flip_rolls_back_with_the_consume(service, verifier) -> None:

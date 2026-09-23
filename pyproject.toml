@@ -8,12 +8,14 @@ version = "0.1.0"
 description = "Single-operator MCP trust layer: cited runbook guidance, controlled execution, durable audit."
 requires-python = ">=3.12"
 dependencies = [
+    "fastmcp>=2.0",
     "jcs>=0.2.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.23",
     "hypothesis>=6.100",
 ]
 
@@ -23,3 +25,4 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+asyncio_mode = "auto"

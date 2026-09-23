@@ -27,3 +27,12 @@ The immutable, human-verified unit of procedural evidence: one operation, its pr
 
 ### Citation
 A reference binding one passage locator to one runbook revision content hash. It qualifies as required procedural evidence only when the revision is verified and unchanged. Authority: [runbook format](docs/runbook-format.md). Rejected alias: **"quote"** — a quotation without revision binding drifts when the document changes and is not evidence.
+
+### Comparator
+The retrieval ranker declared before an assessment runs — currently the #11 keyword scoring. It is frozen while a dataset is measured; changing it after seeing results is tuning-to-the-test. Authority: [retrieval evaluation](docs/retrieval-evaluation.md). Rejected alias: **"the retriever"** — the comparator is the evaluated ranker under a declared protocol, not the production retrieval subsystem as a whole.
+
+### Document-order baseline
+The declared no-relevance ranking (fixed dataset order) against which a comparator must outperform. It deliberately ignores the question. Authority: [retrieval evaluation](docs/retrieval-evaluation.md). Rejected alias: **"random baseline"** — the declared baseline is deterministic and reproducible, not stochastic.
+
+### Top-1 citation correctness
+The only retrieval metric: the single returned result must carry the expected runbook id and locator, bound to the expected revision content hash. Answer plausibility is never scored. Authority: [retrieval evaluation](docs/retrieval-evaluation.md). Rejected alias: **"accuracy"** — unqualified accuracy invites plausibility scoring, which the metric exists to avoid.

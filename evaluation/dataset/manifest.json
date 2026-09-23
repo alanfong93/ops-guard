@@ -1,0 +1,107 @@
+{
+  "dataset_version": "1.0.0",
+  "description": "Labelled verified-runbook cases for retrieval assessment. Expected=None cases assert no evidence is returned.",
+  "revisions": [
+    {
+      "file": "dataset/n8n-restart.2026-09-23.1.json",
+      "runbook_id": "n8n-restart",
+      "revision": "2026-09-23.1",
+      "content_hash": "1b4a398fa0989db970dda50a77aa48d0c1111091b617100fdb5b4b15925c1214"
+    },
+    {
+      "file": "dataset/openwebui-update.2026-09-23.1.json",
+      "runbook_id": "openwebui-update",
+      "revision": "2026-09-23.1",
+      "content_hash": "947177b5377f538286541d749d1075c1aa04772d4999176dcb319f8fa3e1a451"
+    },
+    {
+      "file": "dataset/disk-cleanup.2026-09-23.1.json",
+      "runbook_id": "disk-cleanup",
+      "revision": "2026-09-23.1",
+      "content_hash": "daa4915854fb2feef00c1e4e69a31094249827b7e415ce639fac174fd62e3170"
+    },
+    {
+      "file": "dataset/backup-restore.2026-09-23.1.json",
+      "runbook_id": "backup-restore",
+      "revision": "2026-09-23.1",
+      "content_hash": "f3ae11a6cb5b6a2cb23515990706831df711652b83718bb10a652bbece266c7b"
+    },
+    {
+      "file": "dataset/dns-flush.2026-09-23.1.json",
+      "runbook_id": "dns-flush",
+      "revision": "2026-09-23.1",
+      "content_hash": "cd1ad788a83ab4f93a2fd5ff632417acebc99b9b87f17b49debb57ef612ba5e2"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "C1",
+      "question": "how do I restart n8n and check it is healthy",
+      "expected": {
+        "runbook_id": "n8n-restart",
+        "locator": "restart/steps"
+      },
+      "category": "direct-procedural"
+    },
+    {
+      "case_id": "C2",
+      "question": "verify the n8n restart finished",
+      "expected": {
+        "runbook_id": "n8n-restart",
+        "locator": "restart/verify"
+      },
+      "category": "verification-step"
+    },
+    {
+      "case_id": "C3",
+      "question": "apply the openwebui update",
+      "expected": {
+        "runbook_id": "openwebui-update",
+        "locator": "update/steps"
+      },
+      "category": "direct-procedural"
+    },
+    {
+      "case_id": "C4",
+      "question": "openwebui will not start after updating, what now",
+      "expected": {
+        "runbook_id": "openwebui-update",
+        "locator": "update/rollback"
+      },
+      "category": "failure-recovery"
+    },
+    {
+      "case_id": "C5",
+      "question": "docker host is running out of disk space",
+      "expected": {
+        "runbook_id": "disk-cleanup",
+        "locator": "cleanup/prune"
+      },
+      "category": "symptom-phrased"
+    },
+    {
+      "case_id": "C6",
+      "question": "restore n8n from last night's backup",
+      "expected": {
+        "runbook_id": "backup-restore",
+        "locator": "restore/steps"
+      },
+      "category": "direct-procedural"
+    },
+    {
+      "case_id": "C7",
+      "question": "clear the dns cache on the resolver",
+      "expected": {
+        "runbook_id": "dns-flush",
+        "locator": "flush/steps"
+      },
+      "category": "direct-procedural"
+    },
+    {
+      "case_id": "C8",
+      "question": "who approved the openwebui update",
+      "expected": null,
+      "category": "not-procedural"
+    }
+  ]
+}

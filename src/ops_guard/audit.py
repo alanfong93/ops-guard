@@ -32,10 +32,12 @@ caller-owned transaction, so the execution gate can pair the pre-execution
 append with the proposal-token consumption in one durable transaction) and
 read. There is no update or delete method on this surface. The underlying
 guarded-connection boundary is defensive, not a sandbox (see
-``ops_guard.store``): it additionally rejects delete/drop/alter/truncate
-statement heads, and narrowing it to vetted operations is tracked for the
-execution gate. Storage failure propagates: a required append that cannot
-persist raises ``AuditWriteFailure``, and the caller must not execute.
+``ops_guard.store``): it additionally rejects delete/drop/alter/truncate/
+replace statement heads — while update and insert-or-replace remain allowed
+for the approval flip — and narrowing the seam to vetted operations is
+tracked for the execution gate. Storage failure propagates: a required
+append that cannot persist raises ``AuditWriteFailure``, and the caller must
+not execute.
 """
 
 from __future__ import annotations

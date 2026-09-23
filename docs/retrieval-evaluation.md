@@ -1,7 +1,9 @@
 # Retrieval evaluation — dataset 1.0.0
 
 Reproducible run: `.venv/Scripts/python.exe evaluation/run_assessment.py`
-(the script prints this same result set; `tests/test_evaluation.py` pins it).
+(the script prints this same result set; `tests/test_evaluation.py` pins the
+per-case outcomes). The harness verifies the manifest content hashes against
+the parsed documents before measuring and fails loudly on drift.
 
 ## Declared before measuring
 
@@ -11,14 +13,17 @@ Reproducible run: `.venv/Scripts/python.exe evaluation/run_assessment.py`
   runbook id/locator. Declared as the naive baseline comparator in the #11
   contract; it was **not** tuned after seeing these results.
 - **Baseline** — document-order ranking with no query relevance (fixed order
-  over the dataset, first passage top-1).
+  over the dataset, first passage top-1). Note: a stopword-filtered keyword
+  variant — the obvious one-line improvement — also scores 5/8, identical to
+  the frozen comparator; the published gap is against fixed order, and this
+  dataset cannot distinguish the comparator from that lexical variant.
 - **Metric** — top-1 citation correctness: the single returned result must
   carry the expected runbook id and locator, bound to the expected revision
   content hash. Answer plausibility is **not** scored: passage text quality
   is separated from citation correctness by construction.
-- **Dataset** — version 1.0.0, 5 verified revisions / 10 passages / 8
+- **Dataset** — version 1.0.0, 5 verified revisions / 7 passages / 8
   labelled cases (`evaluation/dataset/manifest.json`; revision content
-  hashes pinned in the manifest).
+  hashes pinned in the manifest and cross-checked at run time).
 
 ## Results
 
@@ -26,21 +31,23 @@ Reproducible run: `.venv/Scripts/python.exe evaluation/run_assessment.py`
 |---|---|---|
 | Top-1 citation correctness | **5 / 8** | 1 / 8 |
 
-Comparator outperforms the baseline 5:1 on this dataset.
+The comparator outperforms the baseline 5:1 on this dataset (n=8; the four
+discordant cases all favour the comparator; no significance claim is made
+at this sample size).
 
 ## Categorized failures (comparator)
 
 | Case | Category | Cause |
 |---|---|---|
-| C2 (`verify the n8n restart finished`) | `wrong_revision` | Stopword inflation: the declared comparator counts occurrences of "the", letting the backup-restore revision outscore the target passage. Declared limitation of the naive baseline. |
-| C4 (`openwebui will not start after updating`) | `wrong_passage_same_revision` | Sibling-passage near miss: `update/steps` shares "openwebui"/"updating" terms with the expected `update/rollback`. Same revision, wrong passage — citation correctness still identifies the revision correctly. |
+| C2 (`verify the n8n restart finished`) | `wrong_runbook` | Stopword inflation: the declared comparator counts occurrences of "the", letting the backup-restore revision outscore the target. Declared limitation of the naive baseline. |
+| C4 (`openwebui will not start after updating`) | `wrong_passage_same_revision` | Sibling-passage near miss: `update/steps` shares openwebui/update occurrences with the expected `update/rollback`. Same revision, wrong passage. |
+| C8 (`who approved the openwebui update`) | `returned_evidence_when_none_expected` | The comparator has no relevance floor: any token overlap returns a result, so a non-procedural question yields spurious evidence. Declared limitation; consumers must judge whether a question is procedural. |
 
-Non-procedural questions (C8) correctly return no evidence: the comparator
-does not manufacture plausible-sounding results for questions that have no
-procedural match.
+Non-procedural questions are the clearest declared limitation: the naive
+comparator cannot refuse to answer, it can only rank.
 
 ## Not claimed
 
-These numbers measure citation correctness on a small labelled dataset.
-They are not a claim of operational safety, and they say nothing about
-answer plausibility, judgment quality, or authorization behavior.
+These numbers measure citation correctness on a small labelled dataset
+(n=8). They are not a claim of operational safety, and they say nothing
+about answer plausibility, judgment quality, or authorization behavior.

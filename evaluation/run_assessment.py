@@ -35,8 +35,25 @@ def load_documents(manifest: dict) -> list[dict]:
     return documents
 
 
-def document_order_baseline(manifest: dict, question: str, limit: int = 1) -> list[dict]:
-    """The declared baseline: fixed document order, no query relevance."""
+def verify_dataset_integrity(manifest: dict, documents: list[dict]) -> None:
+    """Every manifest content hash must match the parsed document's
+    recomputed hash; a drifted manifest fails the run loudly."""
+    from ops_guard.runbooks import parse_revision
+
+    for entry, document in zip(manifest["revisions"], documents):
+        revision = parse_revision(document)  # raises on tampering
+        if revision.content_hash != entry["content_hash"]:
+            raise SystemExit(
+                f"manifest content_hash for {entry['runbook_id']} does not match "
+                f"the document ({revision.content_hash})"
+            )
+
+
+def document_order_baseline(manifest: dict, limit: int = 1) -> list[dict]:
+    """The declared baseline: fixed document order, no query relevance.
+
+    Deliberately ignores the question; kept in the comparison signature so
+    the scoring call site is identical for both sides."""
     results = []
     for entry in manifest["revisions"]:
         with open(os.path.join(DATASET_DIR, os.path.basename(entry["file"])), encoding="utf-8") as handle:
@@ -54,14 +71,19 @@ def document_order_baseline(manifest: dict, question: str, limit: int = 1) -> li
 
 def score(harness_results: list[dict], expected: dict | None) -> dict:
     if expected is None:
-        return {"top1_correct": len(harness_results) == 0, "category": "no-evidence-expected"}
+        if harness_results:
+            return {
+                "top1_correct": False,
+                "category": "returned_evidence_when_none_expected",
+            }
+        return {"top1_correct": True, "category": "no-evidence-expected"}
     if not harness_results:
         return {"top1_correct": False, "category": "no_result"}
     top = harness_results[0]
-    if top["content_hash"] != expected.get("content_hash"):
-        return {"top1_correct": False, "category": "wrong_revision"}
     if top["runbook_id"] != expected["runbook_id"]:
         return {"top1_correct": False, "category": "wrong_runbook"}
+    if top["content_hash"] != expected.get("content_hash"):
+        return {"top1_correct": False, "category": "wrong_revision"}
     if top["locator"] != expected["locator"]:
         return {"top1_correct": False, "category": "wrong_passage_same_revision"}
     return {"top1_correct": True, "category": "correct"}
@@ -70,6 +92,7 @@ def score(harness_results: list[dict], expected: dict | None) -> dict:
 def run() -> dict:
     manifest = load_manifest()
     documents = load_documents(manifest)
+    verify_dataset_integrity(manifest, documents)
     library, rejections = RunbookLibrary.load(documents)
     if rejections:
         raise SystemExit(f"dataset contains invalid revisions: {rejections}")
@@ -86,7 +109,7 @@ def run() -> dict:
             }
             for r in comparator
         ]
-        baseline = document_order_baseline(manifest, case["question"], limit=1)
+        baseline = document_order_baseline(manifest, limit=1)
         comparator_score = score(comparator_dicts, case["expected"])
         baseline_score = score(baseline, case["expected"])
         if case["expected"] is not None:

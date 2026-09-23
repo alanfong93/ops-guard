@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+import json
+
 from ops_guard.errors import ProposalError
 from ops_guard.invocation import Invocation, canonicalize_json, ensure_json_representable
 
@@ -92,9 +94,10 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
     arguments = document.get("arguments")
     if not isinstance(arguments, Mapping):
         raise MalformedAuthorizationError("arguments must be a mapping")
-    # One snapshot: validate exactly the mapping that gets stored, so a
-    # hostile or mutating Mapping cannot pass validation with different
-    # values than the record will carry.
+    # One snapshot, deep-frozen through the canonical serialization: validate
+    # exactly the JSON values that get stored, so a hostile or mutating
+    # Mapping cannot pass validation with different values than the record
+    # will carry — including nested containers.
     arguments = dict(arguments)
     try:
         # A permitted invocation must be exactly representable under the
@@ -102,7 +105,7 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
         # otherwise the rule could collide with a neighbouring literal or
         # crash the matcher.
         ensure_json_representable(arguments)
-        canonicalize_json(arguments)
+        arguments = json.loads(canonicalize_json(arguments))
     except (TypeError, ValueError, AttributeError, UnicodeEncodeError,
             RecursionError, OverflowError) as error:
         raise MalformedAuthorizationError(
@@ -162,13 +165,12 @@ def match(
         )
     except (TypeError, ValueError, AttributeError, UnicodeEncodeError,
             RecursionError, OverflowError) as error:
-        # ADR 0004 rule 2: the match reports matched or not. An invocation
-        # that cannot be canonicalized under the freeze contract never
-        # matches.
+        # ADR 0004 rule 2: the match reports matched or not. A side that
+        # cannot be canonicalized under the freeze contract never matches.
         return MatchResult(
             matched=False,
             authorization_id=authorization.authorization_id,
-            reason=f"invocation cannot be canonicalized: {error}",
+            reason=f"canonicalization failed on one side: {error}",
         )
     checks = (
         ("script_path", script.path == authorization.script_path),

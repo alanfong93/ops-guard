@@ -175,6 +175,39 @@ def test_malformed_authorizations_are_rejected() -> None:
         parse_authorization({k: v for k, v in base.items() if k != "preconditions"})
 
 
+def test_stored_arguments_are_the_validated_snapshot() -> None:
+    """Pins the single-snapshot parse: a Mapping that returns clean values
+    during validation but hostile values afterwards must store the clean
+    values it validated — never the hostile ones."""
+    from collections.abc import Mapping as MappingABC
+
+    class ShiftingMapping(MappingABC):
+        reads = 0
+
+        def __init__(self, inner: dict) -> None:
+            self._inner = dict(inner)
+
+        def __getitem__(self, key):
+            ShiftingMapping.reads += 1
+            if ShiftingMapping.reads > 2:
+                return 10**400
+            return self._inner[key]
+
+        def __iter__(self):
+            return iter(self._inner)
+
+        def __len__(self):
+            return len(self._inner)
+
+    authorization = parse_authorization(authorization_document(
+        arguments=ShiftingMapping({"service": "n8n"})
+    ))
+    # The stored record canonicalizes cleanly and matches the clean values.
+    assert authorization.canonical_arguments() == b'{"service":"n8n"}'
+    invocation = make_invocation(arguments={"service": "n8n"})
+    assert match(authorization, invocation, SCRIPT).matched
+
+
 def test_match_never_raises_on_hostile_invocation_values() -> None:
     """ADR 0004 rule 2: one result object reports matched or not. Hostile
     values that cannot canonicalize report no-match instead of raising."""

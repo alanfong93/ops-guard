@@ -31,4 +31,4 @@ flowchart TD
     style AUDIT_LOG fill:#e0e7ff,stroke:#3730a3,color:#000
 ```
 
-The judge may attach an advisory risk assessment to a proposal, but it does not alter any gate in this flow and cannot authorize execution.
+The judge may attach an advisory risk assessment to a proposal, but it does not alter any gate in this flow and cannot authorize execution. Proposal-bound approval is recorded and verified by the internal approval verifier (docs/adr/0003-approval-verifier-boundary.md): the proposing host cannot supply it, and the approval is spent exactly when its token is consumed.

@@ -22,3 +22,23 @@ class TokenAlreadyConsumedError(ProposalError):
 
 class TokenExpiredError(ProposalError):
     """The current time is at or past the proposal's absolute expiry."""
+
+
+class ApprovalError(Exception):
+    """Base class for approval-verifier rejections (ADR 0003)."""
+
+
+class HostSuppliedApprovalError(ApprovalError):
+    """No server-recorded approval exists for the presented token."""
+
+
+class ApprovalOperatorMismatchError(ApprovalError):
+    """The operator identity is not the configured operator of this record."""
+
+
+class ApprovalReplayedError(ApprovalError):
+    """The approval is already in the terminal used state."""
+
+
+class ApprovalAlreadyRecordedError(ApprovalError):
+    """A proposal carries at most one approval; a correction is a new proposal."""

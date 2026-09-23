@@ -94,18 +94,24 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
     arguments = document.get("arguments")
     if not isinstance(arguments, Mapping):
         raise MalformedAuthorizationError("arguments must be a mapping")
-    # One snapshot, deep-frozen through the canonical serialization: validate
-    # exactly the JSON values that get stored, so a hostile or mutating
+    # One snapshot, deep-frozen through the canonical serialization: the
+    # frozen values are validated and stored, so a hostile or mutating
     # Mapping cannot pass validation with different values than the record
     # will carry — including nested containers.
+    arguments = document.get("arguments")
+    if not isinstance(arguments, Mapping):
+        raise MalformedAuthorizationError("arguments must be a mapping")
     arguments = dict(arguments)
     try:
-        # A permitted invocation must be exactly representable under the
-        # same freeze contract as real invocations, and must canonicalize —
-        # otherwise the rule could collide with a neighbouring literal or
-        # crash the matcher.
+        # Raw-side guard: a literal the freeze contract cannot represent
+        # exactly (ADR 0004) is malformed, not silently rounded.
         ensure_json_representable(arguments)
+        # Freeze, then validate exactly the frozen values that get stored —
+        # a hostile dual-read container cannot pass validation with values
+        # the record does not carry — and confirm the freeze is idempotent.
         arguments = json.loads(canonicalize_json(arguments))
+        ensure_json_representable(arguments)
+        canonicalize_json(arguments)
     except (TypeError, ValueError, AttributeError, UnicodeEncodeError,
             RecursionError, OverflowError) as error:
         raise MalformedAuthorizationError(
@@ -129,7 +135,7 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
     return StandingAuthorization(
         authorization_id=strings["authorization_id"],
         script_path=strings["script_path"],
-        script_sha256=document["script_sha256"],
+        script_sha256=script_sha256,
         action=strings["action"],
         target=strings["target"],
         arguments=dict(arguments),

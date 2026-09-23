@@ -175,6 +175,50 @@ def test_malformed_authorizations_are_rejected() -> None:
         parse_authorization({k: v for k, v in base.items() if k != "preconditions"})
 
 
+def test_stored_script_sha256_is_the_validated_one() -> None:
+    """Pins the script_sha256 snapshot: a Mapping returning a clean hash on
+    the validation read and a hostile hash on the store read must store the
+    validated value."""
+    from collections.abc import Mapping as MappingABC
+
+    class ShiftingHashMapping(MappingABC):
+        def __init__(self, inner: dict) -> None:
+            self._inner = dict(inner)
+            self.reads = 0
+
+        def __getitem__(self, key):
+            self.reads += 1
+            if key == "script_sha256" and self.reads > 1:
+                return "b" * 64
+            return self._inner[key]
+
+        def __iter__(self):
+            return iter(self._inner)
+
+        def __len__(self):
+            return len(self._inner)
+
+    authorization = parse_authorization(authorization_document(
+        arguments=ShiftingHashMapping({"service": "n8n"})
+    ))
+    assert authorization.script_sha256 == "a" * 64
+
+
+def test_nested_post_parse_mutation_cannot_change_stored_arguments() -> None:
+    """Pins the deep freeze: the stored arguments are decoupled from the
+    caller's document containers."""
+    document = authorization_document(arguments={"tags": ["a"]})
+    document["arguments"]["tags"] = source_tags = ["a"]
+    authorization = parse_authorization(document)
+    invocation = make_invocation(arguments={"tags": ["a", "b"]})
+    assert not match(authorization, invocation, SCRIPT).matched
+    source_tags.append("b")
+    assert not match(authorization, invocation, SCRIPT).matched  # unchanged
+    from ops_guard.invocation import canonicalize_json
+
+    assert canonicalize_json(dict(authorization.arguments)) == canonicalize_json({"tags": ["a"]})
+
+
 def test_stored_arguments_are_the_validated_snapshot() -> None:
     """Pins the single-snapshot parse: a Mapping that returns clean values
     during validation but hostile values afterwards must store the clean
@@ -182,14 +226,13 @@ def test_stored_arguments_are_the_validated_snapshot() -> None:
     from collections.abc import Mapping as MappingABC
 
     class ShiftingMapping(MappingABC):
-        reads = 0
-
         def __init__(self, inner: dict) -> None:
             self._inner = dict(inner)
+            self.reads = 0
 
         def __getitem__(self, key):
-            ShiftingMapping.reads += 1
-            if ShiftingMapping.reads > 2:
+            self.reads += 1
+            if self.reads > 2:
                 return 10**400
             return self._inner[key]
 

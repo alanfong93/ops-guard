@@ -35,7 +35,7 @@ Exactly these keys, no others:
 - `preconditions` — list of `{name, expected}` objects with non-empty string fields; may be empty.
 - `passages` — non-empty list; `locator`s are unique non-empty strings; `text` is non-empty.
 - `verification` — non-empty `verifier`, timezone-aware `verified_at`, non-empty `applicability`. Absent or blank verification means the revision is not human-verified and can never qualify.
-- `content_hash` — SHA-256 hex of the JCS (RFC 8785) canonicalization of the revision document **without** the `content_hash` key: the hash binds the **literal document as stored**. Any change to any other field — including timestamp spelling — changes the hash.
+- `content_hash` — SHA-256 hex of the JCS (RFC 8785) canonicalization of the revision document **without** the `content_hash` key: the hash binds the parsed document's values as stored (encodings that parse to the same value — escapes, key order — share one hash; storage must round-trip a JSON parse). Any change to any other value — including timestamp spelling — changes the hash. The hash is lowercase hexadecimal.
 
 **Trust boundary.** Verification metadata is operator-curated and unauthenticated: the `verifier` string records who reviewed the procedure, and whoever can write a revision into the store holds the authority to certify evidence. The execution gate (#14) binds proposals to the revision content hash; the store's write path is the control point.
 

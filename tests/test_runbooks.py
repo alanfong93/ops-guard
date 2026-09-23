@@ -232,7 +232,7 @@ def test_literal_document_hashing() -> None:
 
 def test_malformed_content_hash_is_typed() -> None:
     document = load("valid-n8n-restart.json")
-    for bad in ("é" * 64, "0" * 63, "g" * 64, ""):
+    for bad in ("é" * 64, "0" * 63, "g" * 64, "", "A" * 64):
         with pytest.raises(MalformedRunbookError):
             parse_revision({**document, "content_hash": bad})
 

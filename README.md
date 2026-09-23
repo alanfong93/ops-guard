@@ -131,6 +131,13 @@ against a no-relevance baseline. See [docs/retrieval-evaluation.md](docs/retriev
 failures categorized). These numbers measure citation correctness only —
 not operational safety.
 
+## Demonstrated behavior
+
+The permitted and refused execution paths — standing authorization,
+proposal-bound approval, every refusal class, and an explicitly unknown
+completion — are demonstrated end-to-end over the real components with
+ordered audit traces. See [docs/execution-demonstration.md](docs/execution-demonstration.md).
+
 ## Why MCP rather than a plugin
 
 A plugin works in one host. A skill works in one host. The Model Context Protocol works across all of them, and is the nearest thing the agent ecosystem has to a shared standard.

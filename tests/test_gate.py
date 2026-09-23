@@ -371,3 +371,57 @@ def test_base_exception_from_executor_still_records_failure(harness: Harness) ->
         harness.gate.execute(make_request(token=issued.token), exits)
     failure = [e for e in harness.audit.events() if e.event_type == "execution_outcome"]
     assert failure and failure[-1].outcome == "failure"
+
+
+def test_script_sha256_is_recorded_in_execution_start(harness: Harness) -> None:
+    """Pins the script-provenance field (#16 handoff): if a refactor drops
+    the recorded hash, the MCP layer loses its verification anchor."""
+    issued = harness.issue()
+    outcome = harness.gate.execute(make_request(token=issued.token), harness.executor)
+    assert outcome.dispatched
+    start = [e for e in harness.audit.events() if e.event_type == "execution_start"]
+    assert start[-1].payload["script_sha256"] == SCRIPT.sha256
+
+
+def test_refusal_append_failure_escapes_fail_closed(harness: Harness) -> None:
+    """Documented window: if the refusal append itself cannot persist, the
+    AuditWriteFailure escapes (fail-closed) — the executor never runs."""
+    issued = harness.issue()
+    original_append_on = harness.audit.append_on
+
+    def failing_append_on(conn, event_type, **kwargs):
+        if event_type == "refusal":
+            raise AuditWriteFailure("audit store unavailable")
+        return original_append_on(conn, event_type, **kwargs)
+
+    harness.audit.append_on = failing_append_on  # type: ignore[method-assign]
+    with pytest.raises(AuditWriteFailure):
+        harness.gate.execute(make_request(token=issued.token, standing=None), harness.executor)
+    assert harness.executor_calls == []
+    frozen = harness.service.resolve(issued.token)
+    assert not frozen.consumed
+
+
+def test_outcome_append_failure_escapes_after_dispatch(harness: Harness) -> None:
+    """Documented window: the outcome append failing after the executor ran
+    propagates AuditWriteFailure — but the execution_start record is durable
+    and the token is consumed (the side effect already happened)."""
+    issued = harness.issue()
+    original_append_on = harness.audit.append_on
+
+    def failing_append_on(conn, event_type, **kwargs):
+        if event_type == "execution_outcome":
+            raise AuditWriteFailure("audit store unavailable")
+        return original_append_on(conn, event_type, **kwargs)
+
+    harness.audit.append_on = failing_append_on  # type: ignore[method-assign]
+    with pytest.raises(AuditWriteFailure):
+        harness.gate.execute(make_request(token=issued.token), harness.executor)
+    from tests_helpers_runbook import VALID_RUNBOOK as _RB
+
+    expected_invocation = make_invocation(runbook_revision_hash=_RB["content_hash"])
+    assert harness.executor_calls == [expected_invocation]
+    events = harness.audit.events()
+    assert [e.event_type for e in events] == ["execution_start"]
+    with pytest.raises(TokenAlreadyConsumedError):
+        harness.service.resolve(issued.token)

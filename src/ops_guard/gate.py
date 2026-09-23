@@ -9,8 +9,12 @@ transaction commits does the executor run; its outcome is recorded
 afterwards (success, failure, or an explicitly unknown completion).
 
 Every failed check records a refusal audit event before any side effect,
-and the executor is never called on a refusal. Judge advice has no input
-to this module: it cannot authorize execution.
+and the executor is never called on a refusal. Two failure windows escape
+as exceptions by design, both after the refusal-recording capability is
+gone: if the refusal append itself cannot persist (``AuditWriteFailure``),
+and if the outcome append fails after the executor has already run. A dead
+store surfaces as a raw sqlite error. Judge advice has no input to this
+module: it cannot authorize execution.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from ops_guard.audit import AuditLog, AuditWriteFailure
 from ops_guard.authorization import ScriptIdentity, StandingAuthorization, match
 from ops_guard.errors import (
     ApprovalError,
+    InvocationMismatchError,
     ProposalError,
     TokenAlreadyConsumedError,
     TokenExpiredError,
@@ -181,6 +186,8 @@ class ExecutionGate:
                 path = "proposal-bound"
             except ApprovalError as error:
                 refusal_bits.append(f"approval: {error}")
+            except InvocationMismatchError as error:
+                refusal_bits.append(f"approval: {error}")
             except (UnknownTokenError, TokenExpiredError, TokenAlreadyConsumedError) as error:
                 refusal_bits.append(f"approval: {error}")
         if path is None:
@@ -202,6 +209,7 @@ class ExecutionGate:
                     "phase": "pre-execution",
                     "authorization_path": path,
                     "script_path": request.script.path,
+                    "script_sha256": request.script.sha256,
                 },
                 correlation_id=frozen.proposal_id,
                 proposal_ref=frozen.proposal_id,

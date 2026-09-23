@@ -174,6 +174,8 @@ def test_executor_failure_is_recorded_then_raised(harness: Harness) -> None:
         "host-supplied-approval",
         "wrong-operator",
         "audit-failure",
+        "mismatched-expected-digest",
+        "different-revision-evidence",
     ],
 )
 def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harness) -> None:
@@ -301,6 +303,30 @@ def test_expired_token_refusal(harness: Harness) -> None:
     harness.clock.advance(11 * 60)
     outcome = harness.gate.execute(make_request(token=issued.token), harness.executor)
     assert not outcome.dispatched and "expired" in outcome.refusal
+
+
+def test_standing_mismatch_falls_back_to_approval(harness: Harness) -> None:
+    """Pinned deliberately (cycle 2): a standing mismatch is not a refusal —
+    the approval path still authorizes, and the supplied script identity is
+    recorded as-is for the MCP layer to verify (#16 handoff)."""
+    issued = harness.issue()
+    harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    mismatched = parse_authorization({
+        "authorization_id": "other-rule",
+        "script_path": SCRIPT.path,
+        "script_sha256": SCRIPT.sha256,
+        "action": "destroy",
+        "target": "n8n",
+        "arguments": {"service": "n8n", "timeout_seconds": 30},
+        "preconditions": [{"name": "healthcheck", "expected": "passing"}],
+        "runbook_revision_hash": VALID_RUNBOOK["content_hash"],
+    })
+    outcome = harness.gate.execute(
+        make_request(token=issued.token, standing=mismatched), harness.executor
+    )
+    assert outcome.dispatched and outcome.authorization_path == "proposal-bound"
+    start = [e for e in harness.audit.events() if e.event_type == "execution_start"]
+    assert start[-1].payload["script_path"] == SCRIPT.path
 
 
 def test_standing_dispatch_spends_a_recorded_approval(harness: Harness) -> None:

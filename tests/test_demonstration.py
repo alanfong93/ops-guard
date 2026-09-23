@@ -41,7 +41,7 @@ def test_permitted_paths_leave_ordered_redacted_audit_events() -> None:
     trace = run_demonstration()
     events = trace["audit_events"]
     types = [e["event_type"] for e in events]
-    assert types == [t for t in types]  # ordered by sequence (store contract)
+    assert [e["sequence"] for e in events] == list(range(1, len(events) + 1))
     assert types.count("execution_start") == 4
     assert types.count("execution_outcome") == 4
     assert types.count("refusal") == len([s for s in scenarios_list(trace) if not s["dispatched"]])

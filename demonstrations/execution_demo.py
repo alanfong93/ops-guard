@@ -70,7 +70,7 @@ def run_demonstration() -> dict:
 
     import os as _os
 
-    from helpers import FakeClock, make_invocation  # tests package helper
+    from helpers import FakeClock  # tests package helper
 
     path = os.path.join(tempfile.mkdtemp(prefix="ops-guard-demo-"), "ops-guard.db")
     clock = FakeClock()
@@ -101,7 +101,7 @@ def run_demonstration() -> dict:
 
     trace: list[dict] = []
 
-    def record(scenario: str, request: ExecutionRequest, ran: bool, outcome) -> None:
+    def record(scenario: str, ran: bool, outcome) -> None:
         executed = ran and harness_executor_calls[-1:] or []
         trace.append({
             "scenario": scenario,
@@ -139,7 +139,7 @@ def run_demonstration() -> dict:
     def scenario(name: str, request_obj: ExecutionRequest, worker=executor) -> None:
         before = len(harness_executor_calls)
         outcome = gate.execute(request_obj, worker)
-        record(name, request_obj, len(harness_executor_calls) > before, outcome)
+        record(name, len(harness_executor_calls) > before, outcome)
 
     # 1. Standing-authorization success.
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))

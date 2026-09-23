@@ -138,6 +138,31 @@ def test_comment_rollback_and_rebegin_chain_is_blocked(db_path, token_key, clock
     assert tables == []  # the foreign transaction was never opened
 
 
+def test_obscured_keyword_forms_are_rejected(db_path, token_key, clock) -> None:
+    """BOM / control-char prefixes and quote-glued keywords fail closed."""
+    service = make_service(db_path, token_key=token_key, clock=clock)
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    obscured = [
+        "\ufeffROLLBACK",  # SQLite skips a leading BOM; the filter must not
+        "\ufeffCOMMIT",
+        "\x1bCOMMIT",
+        "ATTACH's' AS y",
+        "SAVEPOINT's1'",
+        "-- only a comment",
+        "/* only a comment */",
+    ]
+
+    for statement in obscured:
+        def hostile(conn, statement=statement):
+            conn.execute(statement)
+
+        with pytest.raises(ValueError):
+            service.consume(issued.token, same_transaction=hostile)
+
+    assert service.resolve(issued.token).proposal_id == issued.proposal_id
+    assert not service.resolve(issued.token).consumed
+
+
 def test_guarded_cursor_hides_the_real_connection(db_path, token_key, clock) -> None:
     service = make_service(db_path, token_key=token_key, clock=clock)
     issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))

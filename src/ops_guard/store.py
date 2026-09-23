@@ -62,14 +62,25 @@ def _lead_keyword(sql: str) -> str:
     # A comment marker glued to the keyword ("COMMIT-- x") ends the keyword.
     for marker in ("--", "/*"):
         word = word.split(marker, 1)[0]
-    return word.rstrip(";")
+    word = word.rstrip(";")
+    # The statement must start with a plain alphabetic keyword. Anything else
+    # — a BOM or control-character prefix, quote-glued operands, empty text —
+    # is either an evasion of this filter or a statement SQLite would reject
+    # anyway; both fail closed here.
+    if not (word.isascii() and word.isalpha()):
+        raise ValueError(
+            "statement does not start with a plain SQL keyword; "
+            "not allowed inside an audit transaction callback"
+        )
+    return word
 
 
 def _reject_transaction_control(sql: str) -> None:
     lead = _lead_keyword(sql)
-    if lead in _TRANSACTION_CONTROL:
+    if not lead or lead in _TRANSACTION_CONTROL:
         raise ValueError(
-            f"statement {lead.upper()!r} is not allowed inside an audit transaction callback"
+            f"statement {lead!r} is not allowed inside an audit transaction callback; "
+            "statements must start with a plain SQL keyword"
         )
 
 

@@ -31,6 +31,7 @@ from ops_guard.audit import (
     AuditWriteFailure,
     redact,
 )
+from ops_guard.gate import ExecutionGate, ExecutionRequest, GateOutcome
 from ops_guard.errors import (
     ApprovalAlreadyRecordedError,
     ApprovalError,
@@ -75,7 +76,10 @@ __all__ = [
     "Citation",
     "CitedPassage",
     "DEFAULT_SENSITIVE_KEYS",
+    "ExecutionGate",
+    "ExecutionRequest",
     "FrozenProposal",
+    "GateOutcome",
     "HostSuppliedApprovalError",
     "Invocation",
     "InvocationMismatchError",

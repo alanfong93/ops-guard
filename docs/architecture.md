@@ -28,11 +28,22 @@ The server persists the following logical records. This describes the required r
 ```mermaid
 erDiagram
     RUNBOOK_REVISION ||--|{ PASSAGE : "contains"
+    STANDING_AUTHORIZATION }o--|| RUNBOOK_REVISION : "draws evidence from"
     PROPOSAL }o--|| RUNBOOK_REVISION : "cites evidence from"
     PROPOSAL ||--o| APPROVAL : "is authorized by"
     PROPOSAL ||--o| AUTHORIZATION : "uses"
     PROPOSAL ||--o{ AUDIT_RECORD : "creates"
     AUTHORIZATION ||--o{ AUDIT_RECORD : "is recorded in"
+    STANDING_AUTHORIZATION {
+        string authorization_id
+        string script_path
+        string script_sha256 "verified script identity"
+        string action
+        string target
+        string arguments "exact permitted values"
+        string preconditions "exact permitted pairs, order significant"
+        string runbook_revision_hash
+    }
     RUNBOOK_REVISION {
         string runbook_id
         string revision

@@ -59,11 +59,21 @@ erDiagram
         string invocation_binding
     }
     AUDIT_RECORD {
-        string event_type
-        string cited_evidence
-        string observed_outcome
+        integer sequence "globally monotonic, gapless"
+        string event_id
+        integer schema_version
         datetime recorded_at
+        string event_type
+        string correlation_id
+        string proposal_ref
+        string invocation_digest
+        string evidence_refs "JSON array of cited references"
+        string authorization_path
+        string judge_snapshot "redacted, when present"
+        string payload "redacted canonical JSON"
+        string outcome "success, failure, unknown, or refused"
+        string failure_code
     }
 ```
 
-The proposal store is transactional (SQLite today) so that token consumption can commit atomically with the pre-execution audit append; the frozen-invocation and token contract is recorded in [ADR 0002](adr/0002-frozen-invocation-audit-contract.md). An approval is recorded only on the internal operator path, is single-use, and its recorded-to-used transition joins the token-consumption transaction ([ADR 0003](adr/0003-approval-verifier-boundary.md)).
+The proposal store is transactional (SQLite today) so that token consumption can commit atomically with the pre-execution audit append; the frozen-invocation and token contract is recorded in [ADR 0002](adr/0002-frozen-invocation-audit-contract.md). An approval is recorded only on the internal operator path, is single-use, and its recorded-to-used transition joins the token-consumption transaction ([ADR 0003](adr/0003-approval-verifier-boundary.md)). Audit events are insert-only with write-time redaction: sensitive values are replaced by an explicit redaction marker plus a keyed fingerprint; the audit interface exposes append and read only.

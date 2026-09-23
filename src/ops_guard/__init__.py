@@ -14,6 +14,15 @@ from ops_guard.approvals import (
     ApprovalStore,
     ApprovalVerifier,
 )
+from ops_guard.audit import (
+    AUDIT_SCHEMA_VERSION,
+    DEFAULT_SENSITIVE_KEYS,
+    AuditEvent,
+    AuditLog,
+    AuditStore,
+    AuditWriteFailure,
+    redact,
+)
 from ops_guard.errors import (
     ApprovalAlreadyRecordedError,
     ApprovalError,
@@ -31,6 +40,7 @@ from ops_guard.proposals import FrozenProposal, IssuedProposal, ProposalService
 from ops_guard.store import ProposalStore
 
 __all__ = [
+    "AUDIT_SCHEMA_VERSION",
     "ApprovalAlreadyRecordedError",
     "ApprovalDecision",
     "ApprovalError",
@@ -39,6 +49,11 @@ __all__ = [
     "ApprovalReplayedError",
     "ApprovalStore",
     "ApprovalVerifier",
+    "AuditEvent",
+    "AuditLog",
+    "AuditStore",
+    "AuditWriteFailure",
+    "DEFAULT_SENSITIVE_KEYS",
     "FrozenProposal",
     "HostSuppliedApprovalError",
     "Invocation",
@@ -50,4 +65,5 @@ __all__ = [
     "TokenAlreadyConsumedError",
     "TokenExpiredError",
     "UnknownTokenError",
+    "redact",
 ]

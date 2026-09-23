@@ -33,9 +33,40 @@ _TRANSACTION_CONTROL = frozenset(
 )
 
 
+def _lead_keyword(sql: str) -> str:
+    """First meaningful keyword of a statement, skipping whitespace and SQL comments.
+
+    Only the statement head is tokenized; the rest of the string is not
+    interpreted, so string literals containing comment markers elsewhere in
+    the statement are unaffected.
+    """
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch.isspace() or ch in "(;":
+            i += 1
+        elif sql.startswith("--", i):
+            newline = sql.find("\n", i)
+            i = n if newline == -1 else newline + 1
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                return ""  # unterminated block comment: sqlite will reject
+            i = end + 2
+        else:
+            break
+    parts = sql[i:].split(None, 1)
+    if not parts:
+        return ""
+    word = parts[0].lower()
+    # A comment marker glued to the keyword ("COMMIT-- x") ends the keyword.
+    for marker in ("--", "/*"):
+        word = word.split(marker, 1)[0]
+    return word.rstrip(";")
+
+
 def _reject_transaction_control(sql: str) -> None:
-    parts = sql.lstrip(" \t\r\n(;").split(None, 1)
-    lead = parts[0].lower().rstrip(";") if parts else ""
+    lead = _lead_keyword(sql)
     if lead in _TRANSACTION_CONTROL:
         raise ValueError(
             f"statement {lead.upper()!r} is not allowed inside an audit transaction callback"
@@ -80,13 +111,15 @@ class GuardedConnection:
     """Capability boundary around a live transaction connection.
 
     ``__getattribute__`` whitelists the surface, so the real connection is not
-    reachable through instance attributes, and transaction-control SQL is
-    rejected up front (sqlite3 also refuses multi-statement strings, so a
-    statement-prefix check is sufficient). This prevents accidental or casual
-    transaction control by the audit callback. A determined in-process
-    adversary can bypass any Python-level guard; that residual is caught by
-    the ``in_transaction`` checks in ``ProposalStore.transaction``, which
-    raise instead of leaving a silent partial commit.
+    reachable through instance attributes, and transaction-control SQL —
+    including comment-obscured forms — is rejected up front (sqlite3 also
+    refuses multi-statement strings, so a lead-keyword check after comment
+    stripping is sufficient). This prevents accidental or casual transaction
+    control by the audit callback. A determined in-process adversary can
+    bypass any Python-level guard; the ``in_transaction`` checks in
+    ``ProposalStore.transaction`` catch the common bypasses (an ended
+    transaction) and raise instead of leaving a silent partial commit, but
+    the pairing remains a defensive boundary, not an in-process sandbox.
     """
 
     __slots__ = ("_conn",)

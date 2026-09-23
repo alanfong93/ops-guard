@@ -190,6 +190,20 @@ def test_non_string_mapping_keys_are_rejected_as_domain_errors() -> None:
         raise AssertionError("non-string mapping keys must raise a domain ValueError")
 
 
+def test_deep_nesting_and_lone_surrogates_are_domain_errors() -> None:
+    deep = current = {}
+    for _ in range(3000):
+        current["n"] = child = {}
+        current = child
+    for bad in ({"k": "\ud800"}, deep):
+        try:
+            make_invocation(arguments=bad).canonical_bytes()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{type(bad)} must raise a domain ValueError at freeze")
+
+
 def test_digest_matches_digest_bytes_helper() -> None:
     invocation = make_invocation()
     assert digest_bytes(invocation.canonical_bytes()) == invocation.digest

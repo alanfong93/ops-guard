@@ -56,21 +56,27 @@ class Invocation:
         re-verify — encode such values as strings.
         """
         value = self.to_json()
-        _reject_unrepresentable_numbers(value)
         try:
+            _reject_unrepresentable_numbers(value)
             frozen = canonicalize_json(value)
             reparsed = json.loads(frozen)
-        except (AttributeError, TypeError) as error:
+        except (AttributeError, TypeError, UnicodeEncodeError, RecursionError) as error:
             raise ValueError(
                 "invocation contains values that are not JSON-representable "
-                f"({error}); mapping keys must be strings"
+                f"({type(error).__name__}: {error}); mapping keys must be strings "
+                "and nesting must stay within reasonable depth"
             ) from error
-        _reject_unrepresentable_numbers(reparsed)
-        if canonicalize_json(reparsed) != frozen:
+        try:
+            _reject_unrepresentable_numbers(reparsed)
+            if canonicalize_json(reparsed) != frozen:
+                raise ValueError(
+                    "invocation does not round-trip canonical serialization; "
+                    "encode the affected values as strings"
+                )
+        except RecursionError as error:
             raise ValueError(
-                "invocation does not round-trip canonical serialization; "
-                "encode the affected values as strings"
-            )
+                "invocation nesting is too deep to re-verify; flatten it"
+            ) from error
         return frozen
 
     @property

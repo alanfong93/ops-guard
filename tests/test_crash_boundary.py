@@ -88,6 +88,12 @@ def test_callback_cannot_send_transaction_control_sql(db_path, token_key, clock)
         "SAVEPOINT sneaky",
         "RELEASE sneaky",
         "VACUUM",
+        "-- x\nCOMMIT",
+        "/* c */ COMMIT",
+        "COMMIT-- x",
+        "-- x\nROLLBACK",
+        "-- x\nBEGIN IMMEDIATE",
+        "/* c */ RELEASE sneaky",
     ]
 
     for statement in attempts:
@@ -102,6 +108,34 @@ def test_callback_cannot_send_transaction_control_sql(db_path, token_key, clock)
     resolved = service.resolve(issued.token)
     assert not resolved.consumed
     assert service.consume(issued.token).consumed
+
+
+def test_comment_rollback_and_rebegin_chain_is_blocked(db_path, token_key, clock) -> None:
+    """The cycle-3 silent-defeat chain: comment ROLLBACK, comment BEGIN, INSERT."""
+    service = make_service(db_path, token_key=token_key, clock=clock)
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+
+    def evasive_callback(conn) -> None:
+        conn.execute("-- undo\nROLLBACK")
+        conn.execute("-- reopen\nBEGIN")
+        conn.execute("CREATE TABLE IF NOT EXISTS audit_probe (id INTEGER PRIMARY KEY, note TEXT)")
+        conn.execute("INSERT INTO audit_probe (note) VALUES ('unpaired')")
+
+    with pytest.raises(ValueError):
+        service.consume(issued.token, same_transaction=evasive_callback)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        state = conn.execute(
+            "SELECT state FROM proposals WHERE proposal_id = ?", (issued.proposal_id,)
+        ).fetchone()[0]
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'audit_probe'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert state == "active"  # consume never happened
+    assert tables == []  # the foreign transaction was never opened
 
 
 def test_guarded_cursor_hides_the_real_connection(db_path, token_key, clock) -> None:

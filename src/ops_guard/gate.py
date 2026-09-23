@@ -103,6 +103,7 @@ class ExecutionGate:
                 payload={"reason": reason, "gate": "execution"},
                 proposal_ref=proposal_id,
                 invocation_digest=digest or request.expected_digest,
+                outcome="refused",
             )
             return GateOutcome(
                 dispatched=False,
@@ -207,7 +208,6 @@ class ExecutionGate:
                 "execution_start",
                 payload={
                     "phase": "pre-execution",
-                    "authorization_path": path,
                     "script_path": request.script.path,
                     "script_sha256": request.script.sha256,
                 },

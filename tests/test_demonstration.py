@@ -49,7 +49,7 @@ def test_permitted_paths_leave_ordered_redacted_audit_events() -> None:
     # reasons, and dispatch events only exist for permitted paths
     for event in events:
         if event["event_type"] == "refusal":
-            assert event["outcome"] in (None, "refused")
+            assert event["outcome"] == "refused"
 
 
 def test_unknown_completion_recorded_explicitly() -> None:

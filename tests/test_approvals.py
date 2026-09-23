@@ -1,0 +1,238 @@
+"""Approval verifier contract (ADR 0003; issue #12 done-when)."""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from datetime import timedelta
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from ops_guard import (
+    ApprovalAlreadyRecordedError,
+    ApprovalOperatorMismatchError,
+    ApprovalReplayedError,
+    ApprovalStore,
+    ApprovalVerifier,
+    HostSuppliedApprovalError,
+    InvocationMismatchError,
+    ProposalService,
+    TokenAlreadyConsumedError,
+    TokenExpiredError,
+    UnknownTokenError,
+)
+from helpers import fresh_service, make_invocation
+
+OPERATOR = "alan"
+
+
+@pytest.fixture()
+def service(tmp_path, token_key, clock) -> ProposalService:
+    from helpers import make_service
+
+    return make_service(tmp_path / "ops-guard.db", token_key=token_key, clock=clock)
+
+
+@pytest.fixture()
+def verifier(service, clock) -> ApprovalVerifier:
+    return ApprovalVerifier(
+        ApprovalStore(service.store._path),
+        service,
+        operator_identity=OPERATOR,
+        clock=clock,
+    )
+
+
+def _recorded(verifier, service, ttl=timedelta(minutes=10)):
+    issued = service.open_proposal(make_invocation(), ttl=ttl)
+    record = verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    return issued, record
+
+
+def test_recorded_approval_verifies_and_spends_atomically(service, verifier) -> None:
+    issued, record = _recorded(verifier, service)
+    decision = verifier.verify(issued.token, operator_identity=OPERATOR)
+    assert decision.allowed
+    assert decision.approval_id == record.approval_id
+    assert decision.proposal_id == issued.proposal_id
+    assert decision.invocation_digest == issued.invocation_digest
+
+    consumed = service.consume(
+        issued.token, same_transaction=verifier.mark_used_append(issued.token)
+    )
+    assert consumed.consumed
+    with pytest.raises(ApprovalReplayedError):
+        verifier.verify(issued.token, operator_identity=OPERATOR)
+    with pytest.raises(TokenAlreadyConsumedError):
+        service.consume(
+            issued.token, same_transaction=verifier.mark_used_append(issued.token)
+        )
+
+
+def test_host_supplied_approval_is_rejected(verifier, service) -> None:
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    with pytest.raises(HostSuppliedApprovalError):
+        verifier.verify(issued.token, operator_identity=OPERATOR)
+
+
+@given(st.text(min_size=1, max_size=64))
+@settings(max_examples=50)
+def test_unrecorded_tokens_never_verify(attempt: str) -> None:
+    service, clock = fresh_service()
+    lone = ApprovalVerifier(
+        ApprovalStore(service.store._path), service, operator_identity=OPERATOR, clock=clock
+    )
+    with pytest.raises(HostSuppliedApprovalError):
+        lone.verify(attempt, operator_identity=OPERATOR)
+
+
+def test_wrong_operator_cannot_record_or_verify(service, verifier) -> None:
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    with pytest.raises(ApprovalOperatorMismatchError):
+        verifier.record_approval(issued.token, operator_identity="not-alan")
+    verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    with pytest.raises(ApprovalOperatorMismatchError):
+        verifier.verify(issued.token, operator_identity="not-alan")
+
+
+def test_one_approval_per_proposal(service, verifier) -> None:
+    issued, _ = _recorded(verifier, service)
+    with pytest.raises(ApprovalAlreadyRecordedError):
+        verifier.record_approval(issued.token, operator_identity=OPERATOR)
+
+
+def test_expired_proposal_cannot_be_recorded_or_verified(service, verifier, clock) -> None:
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    clock.advance(6 * 60)
+    with pytest.raises(TokenExpiredError):
+        verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    issued2 = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    verifier.record_approval(issued2.token, operator_identity=OPERATOR)
+    clock.advance(6 * 60)
+    with pytest.raises(TokenExpiredError):
+        verifier.verify(issued2.token, operator_identity=OPERATOR)
+    with pytest.raises(TokenExpiredError):
+        service.consume(
+            issued2.token, same_transaction=verifier.mark_used_append(issued2.token)
+        )
+
+
+def test_consumed_or_unknown_tokens_cannot_be_approved(service, verifier) -> None:
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    service.consume(issued.token)
+    with pytest.raises(TokenAlreadyConsumedError):
+        verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    with pytest.raises(UnknownTokenError):
+        verifier.record_approval("never-issued", operator_identity=OPERATOR)
+
+
+def test_tampered_binding_fails_closed(service, verifier) -> None:
+    issued, _ = _recorded(verifier, service)
+    conn = sqlite3.connect(service.store._path)
+    conn.execute(
+        "UPDATE proposals SET invocation_digest = ? WHERE proposal_id = ?",
+        ("f" * 64, issued.proposal_id),
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(InvocationMismatchError):
+        verifier.verify(issued.token, operator_identity=OPERATOR)
+
+
+def test_approval_flip_rolls_back_with_the_consume(service, verifier) -> None:
+    issued, _ = _recorded(verifier, service)
+
+    def failing_append(conn: sqlite3.Connection) -> None:
+        raise RuntimeError("audit write failed")
+
+    combined = verifier.mark_used_append(issued.token)
+
+    def both(conn: sqlite3.Connection) -> None:
+        combined(conn)
+        failing_append(conn)
+
+    with pytest.raises(RuntimeError):
+        service.consume(issued.token, same_transaction=both)
+
+    # The approval flip rolled back with the consumption.
+    conn = sqlite3.connect(service.store._path)
+    try:
+        state = conn.execute(
+            "SELECT state FROM approvals WHERE token_digest = ?",
+            (service.token_digest(issued.token),),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert state == "recorded"
+    assert not service.resolve(issued.token).consumed
+
+    consumed = service.consume(
+        issued.token, same_transaction=verifier.mark_used_append(issued.token)
+    )
+    assert consumed.consumed
+    with pytest.raises(ApprovalReplayedError):
+        verifier.verify(issued.token, operator_identity=OPERATOR)
+
+
+@given(workers=st.integers(min_value=2, max_value=12))
+@settings(max_examples=20, deadline=None)
+def test_exactly_one_gate_attempt_spends_the_approval(workers: int) -> None:
+    service, _clock = fresh_service()
+    verifier = ApprovalVerifier(
+        ApprovalStore(service.store._path),
+        service,
+        operator_identity=OPERATOR,
+        clock=_clock,
+    )
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=30))
+    verifier.record_approval(issued.token, operator_identity=OPERATOR)
+
+    barrier = threading.Barrier(workers)
+    outcomes: list[Exception | None] = []
+    lock = threading.Lock()
+
+    def gate_attempt() -> None:
+        barrier.wait()
+        try:
+            service.consume(
+                issued.token, same_transaction=verifier.mark_used_append(issued.token)
+            )
+            result = None
+        except Exception as error:  # noqa: BLE001 - race outcome is the assertion
+            result = error
+        with lock:
+            outcomes.append(result)
+
+    threads = [threading.Thread(target=gate_attempt) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len([o for o in outcomes if o is None]) == 1
+    for error in outcomes:
+        if error is not None:
+            assert isinstance(error, (TokenAlreadyConsumedError, ApprovalReplayedError))
+    with pytest.raises(ApprovalReplayedError):
+        verifier.verify(issued.token, operator_identity=OPERATOR)
+
+
+@given(approach=st.integers(min_value=1, max_value=590))
+@settings(max_examples=30, deadline=None)
+def test_verify_eligibility_boundary_is_the_proposal_expiry(approach: int) -> None:
+    service, clock = fresh_service()
+    verifier = ApprovalVerifier(
+        ApprovalStore(service.store._path),
+        service,
+        operator_identity=OPERATOR,
+        clock=clock,
+    )
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=10))
+    verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    clock.advance(min(approach, 599))
+    assert verifier.verify(issued.token, operator_identity=OPERATOR).allowed
+    clock.advance(600)  # at or past the ten-minute boundary
+    with pytest.raises(TokenExpiredError):
+        verifier.verify(issued.token, operator_identity=OPERATOR)

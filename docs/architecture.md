@@ -27,6 +27,7 @@ The server persists the following logical records. This describes the required r
 
 ```mermaid
 erDiagram
+    PROPOSAL ||--o| APPROVAL : "is authorized by"
     PROPOSAL ||--o| AUTHORIZATION : "uses"
     PROPOSAL ||--o{ AUDIT_RECORD : "creates"
     AUTHORIZATION ||--o{ AUDIT_RECORD : "is recorded in"
@@ -39,6 +40,15 @@ erDiagram
         datetime expires_at "absolute"
         string state "active or consumed"
         datetime consumed_at
+    }
+    APPROVAL {
+        string approval_id
+        string token_digest "unique - one approval per proposal"
+        string operator_identity "configured operator"
+        string invocation_digest "copied from the frozen proposal"
+        string runbook_revision_hash "copied from the frozen proposal"
+        datetime expires_at "copied from the frozen proposal"
+        string state "recorded or used"
     }
     AUTHORIZATION {
         string type
@@ -53,4 +63,4 @@ erDiagram
     }
 ```
 
-The proposal store is transactional (SQLite today) so that token consumption can commit atomically with the pre-execution audit append; the frozen-invocation and token contract is recorded in [ADR 0002](adr/0002-frozen-invocation-audit-contract.md).
+The proposal store is transactional (SQLite today) so that token consumption can commit atomically with the pre-execution audit append; the frozen-invocation and token contract is recorded in [ADR 0002](adr/0002-frozen-invocation-audit-contract.md). An approval is recorded only on the internal operator path, is single-use, and its recorded-to-used transition joins the token-consumption transaction ([ADR 0003](adr/0003-approval-verifier-boundary.md)).

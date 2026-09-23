@@ -85,8 +85,21 @@ class ProposalService:
         self._token_key = token_key
         self._clock = clock
 
+    @property
+    def store(self) -> ProposalStore:
+        """The transactional store, so consumers can join our transactions."""
+        return self._store
+
     def _token_digest(self, token: str) -> str:
         return hmac.new(self._token_key, token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def token_digest(self, token: str) -> str:
+        """Public keyed digest of a token, for consumer correlation (ADR 0003).
+
+        Approvals and audit records key on this digest; the raw token is
+        never stored.
+        """
+        return self._token_digest(token)
 
     def _now(self) -> datetime:
         moment = self._clock()

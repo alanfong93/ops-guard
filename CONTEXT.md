@@ -12,3 +12,6 @@ The SHA-256 digest of the JCS (RFC 8785) canonicalization of the complete invoca
 
 ### Execution token
 The 256-bit opaque single-use handle returned exactly once when a proposal is created; it proves possession of the capability for exactly one frozen invocation until its absolute expiry, and is stored only as a keyed digest. Authority: [ADR 0002](docs/adr/0002-frozen-invocation-audit-contract.md). Rejected alias: **"authorization"** — a token is a capability handle, not permission; authorization is standing authorization or proposal-bound approval, verified separately.
+
+### Approval record
+The server-recorded, single-use permission binding the configured operator to one frozen proposal, created only on the internal operator path and spent exactly when the proposal's token is consumed. Authority: [ADR 0003](docs/adr/0003-approval-verifier-boundary.md). Rejected alias: **"host approval"** — anything the proposing MCP host presents is by definition not an approval record and is rejected.

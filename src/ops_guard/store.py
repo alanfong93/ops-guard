@@ -29,7 +29,8 @@ CREATE INDEX IF NOT EXISTS idx_proposals_invocation_digest
 
 _TRANSACTION_CONTROL = frozenset(
     {"begin", "commit", "end", "rollback", "abort", "savepoint", "release",
-     "vacuum", "attach", "detach", "delete", "drop", "alter", "truncate"}
+     "vacuum", "attach", "detach", "delete", "drop", "alter", "truncate",
+     "replace"}
 )
 
 

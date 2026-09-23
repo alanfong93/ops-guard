@@ -104,10 +104,13 @@ def test_compound_sensitive_key_variants_are_redacted() -> None:
         "authToken": "and-me",
         "set-cookie": "session=xyz",
         "private_key": "-----BEGIN",
+        "secret_key": "sk_live_prefix_form",
+        "aws_secret_access_key": "prefix-form-again",
         "note": "keep",
     }
     redacted = redact(payload, fingerprint_key=b"k")
-    for key in ("access_token", "api-key", "authToken", "set-cookie", "private_key"):
+    for key in ("access_token", "api-key", "authToken", "set-cookie", "private_key",
+                "secret_key", "aws_secret_access_key"):
         assert redacted[key]["__redacted__"] == "sensitive-key"
     assert redacted["note"] == "keep"
 
@@ -126,6 +129,36 @@ def test_non_serializable_sensitive_value_fails_the_write(audit) -> None:
     with pytest.raises(AuditWriteFailure):
         log.append("request", payload={"password": object()})
     assert log.events() == []
+
+
+def test_overflowing_integers_fail_the_write_typed(audit) -> None:
+    log, _ = audit
+    with pytest.raises(AuditWriteFailure):
+        log.append("request", payload={"n": 10**400})
+    assert log.events() == []
+
+
+def test_destructive_and_replacing_statements_are_blocked_at_the_seam(audit) -> None:
+    log, service = audit
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    log.append("request", payload={"n": 1})
+    for statement in (
+        "DELETE FROM audit_events",
+        "DROP TABLE audit_events",
+        "REPLACE INTO audit_events (sequence, event_id, schema_version, recorded_at,"
+        " event_type, evidence_refs, payload) VALUES (1, 'x', 1, 't', 'tampered', '[]', '{}')",
+        "/* c */ DELETE FROM audit_events",
+    ):
+        def hostile(conn: sqlite3.Connection, statement=statement) -> None:
+            conn.execute(statement)
+            raise AssertionError("destructive SQL must be rejected first")
+
+        with pytest.raises(ValueError):
+            service.consume(issued.token, same_transaction=hostile)
+
+    # The audit history is intact and the token is still eligible.
+    assert [e.sequence for e in log.events()] == [1]
+    assert not service.resolve(issued.token).consumed
 
 
 def test_schema_version_is_read_back_not_constant(audit) -> None:

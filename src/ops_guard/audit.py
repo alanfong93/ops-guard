@@ -71,7 +71,7 @@ def _normalized(key: str) -> str:
 
 def _is_sensitive(key: str, sensitive_roots: frozenset[str]) -> bool:
     normalized = _normalized(key)
-    return any(normalized == root or normalized.endswith(root) for root in sensitive_roots)
+    return any(root in normalized for root in sensitive_roots)
 
 
 def _jsonable(value):
@@ -137,9 +137,9 @@ def redact(
     _reason: str = "sensitive-key",
 ):
     """Write-time redaction walk. A mapping key is sensitive when its
-    normalized form (lowercase, separators stripped) equals or ends with one
-    of ``sensitive_keys`` — so ``access_token``, ``api-key`` and ``authToken``
-    all match. Values under sensitive keys are replaced by
+    normalized form (lowercase, separators stripped) contains one of
+    ``sensitive_keys`` — so ``access_token``, ``api-key``, ``authToken`` and
+    ``secret_key`` all match. Values under sensitive keys are replaced by
     ``{__redacted__: reason, fingerprint: ...}``; the optional keyed
     fingerprint (JCS-serialized input, HMAC prefix) preserves later
     correlation without revealing the value. Caller-supplied ``__redacted__``
@@ -360,7 +360,7 @@ class AuditLog:
             AuditStore.insert_on(conn, event)
             return event
         except (sqlite3.Error, TypeError, ValueError, AttributeError,
-                UnicodeEncodeError, RecursionError) as error:
+                UnicodeEncodeError, RecursionError, OverflowError) as error:
             raise AuditWriteFailure(f"required audit append failed: {error}") from error
 
     def events(self) -> list[AuditEvent]:

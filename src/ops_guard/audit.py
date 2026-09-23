@@ -18,16 +18,24 @@ Contract. Every operational event is one versioned envelope:
 - ``outcome`` / ``failure_code`` — terminal result when the event has one:
   "success", "failure", "unknown", or "refused".
 
-Redaction happens at write time, before persistence: values under sensitive
-keys are replaced by an explicit redaction marker plus an optional keyed
-fingerprint (keyed with the audit key, not the token key) so later
-correlation stays possible without revealing the value.
+Redaction happens at write time, before persistence: a mapping key is
+sensitive when its normalized form matches a root set (so ``access_token``
+and ``api-key`` match); values under sensitive keys are replaced by an
+explicit redaction marker plus a keyed fingerprint (keyed with the operator's
+persistent audit key, not the token key) so later correlation stays possible
+without revealing the value. Only mapping payloads are walked;
+``correlation_id``, ``evidence_refs``, ``authorization_path`` and
+``event_type`` are stored raw by contract.
 
-The interface is insert-only: append (standalone or inside a caller-owned
-transaction — the execution gate pairs the pre-execution append with the
-proposal-token consumption in one durable transaction) and read. There is no
-update or delete path. Storage failure propagates: a required append that
-cannot persist raises, and the caller must not execute.
+The audit *interface* is insert-only — append (standalone or inside a
+caller-owned transaction, so the execution gate can pair the pre-execution
+append with the proposal-token consumption in one durable transaction) and
+read. There is no update or delete method on this surface. The underlying
+guarded-connection boundary is defensive, not a sandbox (see
+``ops_guard.store``): it additionally rejects delete/drop/alter/truncate
+statement heads, and narrowing it to vetted operations is tracked for the
+execution gate. Storage failure propagates: a required append that cannot
+persist raises ``AuditWriteFailure``, and the caller must not execute.
 """
 
 from __future__ import annotations
@@ -35,7 +43,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import secrets
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -49,11 +56,36 @@ from ops_guard.proposals import format_timestamp, parse_timestamp
 AUDIT_SCHEMA_VERSION = 1
 
 DEFAULT_SENSITIVE_KEYS = frozenset(
-    {"password", "secret", "token", "api_key", "apikey", "authorization",
-     "credential", "credentials", "private_key", "cookie", "session"}
+    {"password", "secret", "token", "apikey", "authorization", "auth",
+     "credential", "credentials", "privatekey", "cookie", "session"}
 )
 
 _REDACTED_MARKER = "__redacted__"
+
+
+def _normalized(key: str) -> str:
+    """Lowercase and strip separators so access_token, api-key, authToken all
+    match the apikey/token roots."""
+    return "".join(ch for ch in key.lower() if ch not in "_- ")
+
+
+def _is_sensitive(key: str, sensitive_roots: frozenset[str]) -> bool:
+    normalized = _normalized(key)
+    return any(normalized == root or normalized.endswith(root) for root in sensitive_roots)
+
+
+def _jsonable(value):
+    """Best-effort JSON-model coercion for fingerprint input; rejects values
+    that are not JSON-representable (they cannot be correlated stably)."""
+    if isinstance(value, (bool, str, int, float, type(None))):
+        return value
+    if isinstance(value, Mapping):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    raise ValueError(
+        f"sensitive values must be JSON-representable to fingerprint, got {type(value).__name__}"
+    )
 
 _AUDIT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -83,6 +115,7 @@ class AuditWriteFailure(RuntimeError):
 class AuditEvent:
     sequence: int
     event_id: str
+    schema_version: int
     recorded_at: datetime
     event_type: str
     correlation_id: str | None
@@ -95,10 +128,6 @@ class AuditEvent:
     outcome: str | None
     failure_code: str | None
 
-    @property
-    def schema_version(self) -> int:
-        return AUDIT_SCHEMA_VERSION
-
 
 def redact(
     value,
@@ -107,22 +136,30 @@ def redact(
     fingerprint_key: bytes | None = None,
     _reason: str = "sensitive-key",
 ):
-    """Write-time redaction walk. Values under sensitive keys are replaced by
+    """Write-time redaction walk. A mapping key is sensitive when its
+    normalized form (lowercase, separators stripped) equals or ends with one
+    of ``sensitive_keys`` — so ``access_token``, ``api-key`` and ``authToken``
+    all match. Values under sensitive keys are replaced by
     ``{__redacted__: reason, fingerprint: ...}``; the optional keyed
-    fingerprint (HMAC prefix) preserves later correlation without revealing
-    the value. Everything else passes through unchanged."""
+    fingerprint (JCS-serialized input, HMAC prefix) preserves later
+    correlation without revealing the value. Caller-supplied ``__redacted__``
+    markers are rejected — the marker is reserved for write-time redaction.
+    Only mappings are walked: ``correlation_id``, ``evidence_refs``,
+    ``authorization_path`` and ``event_type`` are stored raw by contract."""
     if isinstance(value, Mapping):
+        if _REDACTED_MARKER in value:
+            raise ValueError(
+                "redaction marker key is reserved for write-time redaction"
+            )
         out = {}
         for key, item in value.items():
-            if isinstance(key, str) and key.lower() in sensitive_keys:
+            if isinstance(key, str) and _is_sensitive(key, sensitive_keys):
                 replacement = {_REDACTED_MARKER: _reason}
                 if fingerprint_key is not None:
-                    digest = hmac.new(
-                        fingerprint_key,
-                        json.dumps(item, sort_keys=True, default=str).encode("utf-8"),
-                        hashlib.sha256,
-                    ).hexdigest()
-                    replacement["fingerprint"] = digest[:16]
+                    digest_input = canonicalize_json(_jsonable(item))
+                    replacement["fingerprint"] = hmac.new(
+                        fingerprint_key, digest_input, hashlib.sha256
+                    ).hexdigest()[:16]
                 out[key] = replacement
             else:
                 out[key] = redact(
@@ -236,28 +273,42 @@ class AuditLog:
         self,
         store: AuditStore,
         *,
-        fingerprint_key: bytes | None = None,
+        fingerprint_key: bytes,
         sensitive_keys: frozenset[str] = DEFAULT_SENSITIVE_KEYS,
         clock: Callable[[], datetime],
     ) -> None:
-        if fingerprint_key is None:
-            fingerprint_key = secrets.token_bytes(32)
+        """``fingerprint_key`` is required and must persist across restarts:
+        it is what makes redacted-value fingerprints correlate over time."""
+        if not fingerprint_key:
+            raise ValueError("fingerprint_key must be a non-empty persistent secret")
         self._store = store
         self._fingerprint_key = fingerprint_key
         self._sensitive_keys = sensitive_keys
         self._clock = clock
 
-    def _build(self, event_type: str, sequence: int, payload, *, correlation_id,
-               proposal_ref, invocation_digest, evidence_refs, authorization_path,
-               judge_snapshot, outcome, failure_code) -> AuditEvent:
+    def _validate(self, event_type, payload, evidence_refs, outcome):
+        """Cheap caller validation; runs outside the write-failure wrapper."""
+        if not isinstance(event_type, str) or not event_type:
+            raise ValueError("event_type must be a non-empty string")
+        if outcome is not None and outcome not in {"success", "failure", "unknown", "refused"}:
+            raise ValueError("outcome must be one of success/failure/unknown/refused")
+        if not isinstance(payload, Mapping):
+            raise ValueError("payload must be a mapping")
+        refs = tuple(evidence_refs)
+        if not all(isinstance(ref, str) for ref in refs):
+            raise ValueError("evidence_refs must be strings")
         moment = self._clock()
         if moment.tzinfo is None or moment.utcoffset() is None:
             raise ValueError("clock must return timezone-aware datetimes")
-        if not event_type:
-            raise ValueError("event_type must be a non-empty string")
+        return refs, moment
+
+    def _build(self, event_type: str, sequence: int, payload, *, moment: datetime,
+               correlation_id, proposal_ref, invocation_digest, evidence_refs,
+               authorization_path, judge_snapshot, outcome, failure_code) -> AuditEvent:
         return AuditEvent(
             sequence=sequence,
             event_id=uuid.uuid4().hex,
+            schema_version=AUDIT_SCHEMA_VERSION,
             recorded_at=moment,
             event_type=event_type,
             correlation_id=correlation_id,
@@ -292,22 +343,24 @@ class AuditLog:
                   invocation_digest: str | None = None, evidence_refs: Sequence[str] = (),
                   authorization_path: str | None = None, judge_snapshot: Mapping | None = None,
                   outcome: str | None = None, failure_code: str | None = None) -> AuditEvent:
-        """Append inside a caller-owned transaction (gate pairing seam)."""
-        probe = self._build(event_type, 0, payload, correlation_id=correlation_id,
-                            proposal_ref=proposal_ref, invocation_digest=invocation_digest,
-                            evidence_refs=evidence_refs, authorization_path=authorization_path,
-                            judge_snapshot=judge_snapshot, outcome=outcome,
-                            failure_code=failure_code)
+        """Append inside a caller-owned transaction (gate pairing seam).
+
+        Persistence failures — including payloads that cannot be canonically
+        serialized or redacted — raise ``AuditWriteFailure`` so the caller
+        refuses execution (PRODUCT: refuse when required recording fails)."""
+        refs, moment = self._validate(event_type, payload, evidence_refs, outcome)
         try:
             sequence = AuditStore.next_sequence_on(conn)
-            event = self._build(event_type, sequence, payload, correlation_id=correlation_id,
-                                proposal_ref=proposal_ref, invocation_digest=invocation_digest,
-                                evidence_refs=evidence_refs, authorization_path=authorization_path,
+            event = self._build(event_type, sequence, payload, moment=moment,
+                                correlation_id=correlation_id, proposal_ref=proposal_ref,
+                                invocation_digest=invocation_digest, evidence_refs=refs,
+                                authorization_path=authorization_path,
                                 judge_snapshot=judge_snapshot, outcome=outcome,
                                 failure_code=failure_code)
             AuditStore.insert_on(conn, event)
             return event
-        except (sqlite3.Error, TypeError, ValueError, RecursionError) as error:
+        except (sqlite3.Error, TypeError, ValueError, AttributeError,
+                UnicodeEncodeError, RecursionError) as error:
             raise AuditWriteFailure(f"required audit append failed: {error}") from error
 
     def events(self) -> list[AuditEvent]:
@@ -319,6 +372,7 @@ def _row_to_event(row: sqlite3.Row) -> AuditEvent:
     return AuditEvent(
         sequence=int(row["sequence"]),
         event_id=row["event_id"],
+        schema_version=int(row["schema_version"]),
         recorded_at=parse_timestamp(row["recorded_at"]),
         event_type=row["event_type"],
         correlation_id=row["correlation_id"],

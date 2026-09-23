@@ -97,6 +97,68 @@ def test_fingerprints_are_keyed_and_stable() -> None:
     assert first["password"]["fingerprint"] != other["password"]["fingerprint"]
 
 
+def test_compound_sensitive_key_variants_are_redacted() -> None:
+    payload = {
+        "access_token": "leak-me",
+        "api-key": "leak-me-too",
+        "authToken": "and-me",
+        "set-cookie": "session=xyz",
+        "private_key": "-----BEGIN",
+        "note": "keep",
+    }
+    redacted = redact(payload, fingerprint_key=b"k")
+    for key in ("access_token", "api-key", "authToken", "set-cookie", "private_key"):
+        assert redacted[key]["__redacted__"] == "sensitive-key"
+    assert redacted["note"] == "keep"
+
+
+def test_redaction_marker_injection_is_rejected(audit) -> None:
+    log, _ = audit
+    with pytest.raises(AuditWriteFailure):
+        log.append(
+            "request",
+            payload={"__redacted__": "not-actually-redacted", "secret": "real"},
+        )
+
+
+def test_non_serializable_sensitive_value_fails_the_write(audit) -> None:
+    log, _ = audit
+    with pytest.raises(AuditWriteFailure):
+        log.append("request", payload={"password": object()})
+    assert log.events() == []
+
+
+def test_schema_version_is_read_back_not_constant(audit) -> None:
+    log, _ = audit
+    log.append("request", payload={})
+    assert log.events()[0].schema_version == AUDIT_SCHEMA_VERSION
+    # A historical row written by an older schema version must read back as
+    # its stored version, not the current constant.
+    conn = sqlite3.connect(log._store._path)
+    conn.execute("UPDATE audit_events SET schema_version = 7")
+    conn.commit()
+    conn.close()
+    assert log.events()[0].schema_version == 7
+
+
+def test_fingerprint_key_is_required(tmp_path) -> None:
+    store = AuditStore(str(tmp_path / "ops-guard.db"))
+    with pytest.raises((TypeError, ValueError)):
+        AuditLog(store, clock=_FixedClock())  # type: ignore[call-arg]
+    with pytest.raises(ValueError):
+        AuditLog(store, fingerprint_key=b"", clock=_FixedClock())
+
+
+def test_outcome_vocabulary_is_validated(audit) -> None:
+    log, _ = audit
+    with pytest.raises(ValueError):
+        log.append("request", payload={}, outcome="excellent")
+    log.append("execution_outcome", payload={}, outcome="unknown")
+    log.append("execution_outcome", payload={}, outcome="refused", failure_code="E-1")
+    outcomes = [e.outcome for e in log.events()]
+    assert outcomes == ["unknown", "refused"]
+
+
 def test_interface_is_insert_only(audit) -> None:
     log, _ = audit
     log.append("request", payload={"a": 1})

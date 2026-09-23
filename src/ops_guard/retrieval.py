@@ -21,15 +21,17 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from fastmcp import FastMCP
+from pydantic import Field
 
 from ops_guard.errors import ProposalError
-from ops_guard.runbooks import Passage, RunbookRevision, parse_revision
+from ops_guard.runbooks import Citation, Passage, RunbookRevision, parse_revision
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
 
 @dataclass(frozen=True)
 class RetrievalRejection:
+    document_index: int
     reason: str
     error: str
 
@@ -49,9 +51,7 @@ class SearchResult:
     applicability: str
     score: int
 
-    def citation(self):
-        from ops_guard.runbooks import Citation
-
+    def citation(self) -> Citation:
         return Citation(
             runbook_id=self.runbook_id,
             revision=self.revision,
@@ -79,12 +79,14 @@ class RunbookLibrary:
         """Load documents; invalid ones are excluded and reported, never served."""
         revisions: list[RunbookRevision] = []
         rejections: list[RetrievalRejection] = []
-        for document in documents:
+        for index, document in enumerate(documents):
             try:
                 revisions.append(parse_revision(document))
-            except ProposalError as error:
+            except (ProposalError, TypeError, ValueError, AttributeError,
+                    UnicodeEncodeError, RecursionError, OverflowError) as error:
                 rejections.append(
                     RetrievalRejection(
+                        document_index=index,
                         reason=str(error),
                         error=type(error).__name__,
                     )
@@ -151,7 +153,10 @@ def build_mcp_server(library: RunbookLibrary) -> FastMCP:
     server: FastMCP = FastMCP("ops-guard-retrieval")
 
     @server.tool
-    def search_runbook(question: str, limit: int = 5) -> list[dict]:
+    def search_runbook(
+        question: str,
+        limit: int = Field(default=5, ge=1),
+    ) -> list[dict]:
         """Cited runbook guidance: every result identifies one exact verified
         passage (runbook id, revision, content hash, locator, verification
         metadata) bound to the operation it evidences."""

@@ -43,25 +43,29 @@ def test_search_returns_one_exact_verified_passage_with_full_evidence() -> None:
     assert top.verifier == "alan"
     assert top.operation_action == "restart"
     assert top.preconditions == ({"name": "healthcheck", "expected": "passing"},)
-    # Round-trip: the returned evidence is a citation that resolves against
-    # the original document — one exact verified passage.
+    # Round-trip: EVERY returned result is a citation that resolves against
+    # the original document — one exact verified passage each.
     document = _load_fixture("valid-n8n-restart.json")
-    cited = resolve_citation(document, top.citation())
-    assert cited.passage.text == top.passage_text
+    for result in results:
+        cited = resolve_citation(document, result.citation())
+        assert cited.passage.text == result.passage_text
 
 
-def test_unverified_and_tampered_documents_never_become_evidence() -> None:
+def test_unverified_tampered_and_malformed_documents_never_become_evidence() -> None:
     documents = [
         VALID_RUNBOOK,
         _load_fixture("invalid-unverified.json"),
         _load_fixture("invalid-tampered.json"),
+        _load_fixture("invalid-malformed.json"),
     ]
     library, rejections = library_with(*documents)
-    assert len(rejections) == 2
+    assert len(rejections) == 3
     assert {r.error for r in rejections} == {
         "UnverifiedRunbookError",
         "TamperedRunbookError",
+        "MalformedRunbookError",
     }
+    assert {r.document_index for r in rejections} == {1, 2, 3}
     for result in library.search("restart n8n"):
         assert result.content_hash == VALID_RUNBOOK["content_hash"]
 

@@ -50,7 +50,7 @@ def test_exact_match_permits_unattended_authorization() -> None:
     assert result.authorization_id == "auth-restart-n8n"
 
 
-def test_missing_field_never_matches() -> None:
+def test_empty_script_hash_never_matches() -> None:
     authorization = parse_authorization(authorization_document())
     invocation = make_invocation()
     truncated = ScriptIdentity(path=SCRIPT.path, sha256="")
@@ -77,11 +77,9 @@ FIELD_MUTATIONS = {
     },
     "runbook_revision_hash": {"invocation": {"runbook_revision_hash": "c" * 64}},
 }
-mutation_names = st.sampled_from(sorted(FIELD_MUTATIONS))
 
 
-@given(mutation_names)
-@settings(max_examples=20)
+@pytest.mark.parametrize("mutation", sorted(FIELD_MUTATIONS))
 def test_each_altered_field_fails_closed(mutation: str) -> None:
     overrides = FIELD_MUTATIONS[mutation]
     invocation_overrides = overrides.get("invocation", {})
@@ -90,6 +88,47 @@ def test_each_altered_field_fails_closed(mutation: str) -> None:
     result = match(authorization, invocation, script)
     assert not result.matched
     assert result.reason
+
+
+def test_json_true_and_one_are_distinct_permitted_values() -> None:
+    authorization = parse_authorization(authorization_document(arguments={"force": True}))
+    same_bool = make_invocation(arguments={"force": True})
+    assert match(authorization, same_bool, SCRIPT).matched
+    number_one = make_invocation(arguments={"force": 1})
+    assert not match(authorization, number_one, SCRIPT).matched
+
+
+def test_non_representable_integer_arguments_are_malformed() -> None:
+    with pytest.raises(MalformedAuthorizationError):
+        parse_authorization(authorization_document(arguments={"n": 9007199254740993}))
+    # The exact neighbour the collision attack relied on is rejected at parse.
+    with pytest.raises(MalformedAuthorizationError):
+        parse_authorization(authorization_document(arguments={"n": 10**17 + 1}))
+    # Representable values remain loadable.
+    parse_authorization(authorization_document(arguments={"n": 2**53}))
+
+
+@given(
+    st.dictionaries(
+        st.text(min_size=1, max_size=8),
+        st.one_of(st.booleans(), st.text(min_size=1, max_size=8), st.integers(min_value=0, max_value=1000)),
+        max_size=4,
+    ),
+    st.dictionaries(
+        st.text(min_size=1, max_size=8),
+        st.one_of(st.booleans(), st.text(min_size=1, max_size=8), st.integers(min_value=0, max_value=1000)),
+        max_size=4,
+    ),
+)
+@settings(max_examples=75)
+def test_unequal_arguments_never_match(left: dict, right: dict) -> None:
+    from ops_guard.invocation import canonicalize_json
+
+    authorization = parse_authorization(authorization_document(arguments=left))
+    invocation = make_invocation(arguments=right)
+    result = match(authorization, invocation, SCRIPT)
+    canonically_equal = canonicalize_json(dict(left)) == canonicalize_json(dict(right))
+    assert result.matched == canonically_equal
 
 
 def test_precondition_order_is_significant() -> None:

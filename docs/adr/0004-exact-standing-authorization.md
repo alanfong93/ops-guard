@@ -27,4 +27,6 @@ Standing authorization lets an invocation run unattended, so it must never gener
 
 - The gate (#14) composes: standing-authorization match or proposal-bound approval verification (#12), then token consumption with audit pairing (ADR 0002 rule 6).
 - The script identity is presented by the caller that intends to execute; #14 resolves the script and passes its path and content hash. A mismatch fails closed here.
+- The gate also resolves the authorization's `runbook_revision_hash` against the runbook store — `parse_revision` recomputes the content hash — before trusting a match. A hash with no verified, human-reviewed revision behind it never grants unattended execution, even when every field equality holds.
 - Authorization records are operator-curated configuration, like runbook verification metadata: unauthenticated data whose authority comes from the operator's control of the configuration store.
+- Permitted invocations obey the same numeric freeze contract as real invocations: an authorization declaring an integer that is not exactly representable as an IEEE-754 double is malformed and never loads.

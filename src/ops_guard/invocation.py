@@ -107,6 +107,15 @@ def canonicalize_json(value: Any) -> bytes:
     return jcs.canonicalize(value)
 
 
+def ensure_json_representable(value: Any) -> None:
+    """Reject values the IEEE-754 freeze contract cannot represent exactly:
+    integers whose double round-trip would lose precision raise ``ValueError``.
+    The authorization layer applies the same rule to operator-declared
+    permitted invocations so a rule can never collide with a neighbouring
+    literal."""
+    _reject_unrepresentable_numbers(value)
+
+
 def _reject_unrepresentable_numbers(value: Any) -> None:
     if isinstance(value, dict):
         for item in value.values():

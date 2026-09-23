@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ops_guard.errors import ProposalError
-from ops_guard.invocation import Invocation, canonicalize_json
+from ops_guard.invocation import Invocation, canonicalize_json, ensure_json_representable
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -92,6 +92,18 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
     arguments = document.get("arguments")
     if not isinstance(arguments, Mapping):
         raise MalformedAuthorizationError("arguments must be a mapping")
+    try:
+        # A permitted invocation must be exactly representable under the
+        # same freeze contract as real invocations, and must canonicalize —
+        # otherwise the rule could collide with a neighbouring literal or
+        # crash the matcher.
+        ensure_json_representable(dict(arguments))
+        canonicalize_json(dict(arguments))
+    except (TypeError, ValueError, AttributeError, UnicodeEncodeError,
+            RecursionError, OverflowError) as error:
+        raise MalformedAuthorizationError(
+            f"arguments are not exactly representable: {error}"
+        ) from error
     preconditions_raw = document.get("preconditions")
     if not isinstance(preconditions_raw, list):
         raise MalformedAuthorizationError("preconditions must be a list")
@@ -127,7 +139,9 @@ def match(
     """All-or-nothing equality between the declared permitted invocation and
     the frozen invocation plus the presented script identity (ADR 0004)."""
     if not isinstance(authorization, StandingAuthorization):
-        raise MalformedAuthorizationError("authorization must be parsed first")
+        raise MalformedAuthorizationError(
+            "authorization must be a parsed StandingAuthorization (use parse_authorization)"
+        )
     if not isinstance(script, ScriptIdentity):
         raise MalformedAuthorizationError("script identity required for matching")
     if not isinstance(invocation, Invocation):

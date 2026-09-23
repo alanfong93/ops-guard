@@ -13,10 +13,12 @@ specific host, or a skill loaded by an agent.
 
 ## Decision
 
-Expose ops-guard as an MCP server. Tools are served over the MCP protocol
-(`search_runbook` first; execution tools through the gate), so the trust
-boundary lives in the server — the approval records, standing-authorization
-matching, execution gate, and audit log survive a host swap.
+Expose ops-guard as an MCP server. The MCP protocol is the integration
+surface — `search_runbook` is served over it today, and execution tools,
+when added, will reach execution only through the gate — so the trust layer
+lives in the server, and for operations submitted through it the approval
+records, standing-authorization matching, execution gate, and audit log
+survive a host swap.
 
 ## Rejected alternatives
 

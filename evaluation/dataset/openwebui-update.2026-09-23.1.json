@@ -1,0 +1,34 @@
+{
+  "runbook_id": "openwebui-update",
+  "revision": "2026-09-23.1",
+  "operation": {
+    "action": "update",
+    "target": "openwebui"
+  },
+  "preconditions": [
+    {
+      "name": "backup",
+      "expected": "done"
+    },
+    {
+      "name": "image-pulled",
+      "expected": "true"
+    }
+  ],
+  "passages": [
+    {
+      "locator": "update/steps",
+      "text": "docker compose pull openwebui && docker compose up -d openwebui to apply the openwebui update."
+    },
+    {
+      "locator": "update/rollback",
+      "text": "if the openwebui container fails to start, pin the previous image tag and restart."
+    }
+  ],
+  "verification": {
+    "verifier": "alan",
+    "verified_at": "2026-09-23T09:00:00.000000+00:00",
+    "applicability": "alan's self-hosted docker host"
+  },
+  "content_hash": "947177b5377f538286541d749d1075c1aa04772d4999176dcb319f8fa3e1a451"
+}

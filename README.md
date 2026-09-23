@@ -122,6 +122,15 @@ flowchart TD
 
 Where an advisory judgment is used, its audit record retains the supplied evidence snapshot, model and inference configuration, versioned rubric and state schema, exact candidate menu where applicable, thresholds, and result or failure. Source evidence, declared expectations, independently observed outcomes, and deterministic derived facts remain distinguishable. A changed judgment is evaluated on labelled normal, ambiguous, and adversarial cases in shadow mode before it can influence operational recommendations; that evaluation never confers authorization.
 
+## Retrieval evaluation
+
+Retrieval quality is measured, not asserted: a versioned labelled dataset,
+a comparator declared before measuring, and top-1 citation correctness
+against a no-relevance baseline. See [docs/retrieval-evaluation.md](docs/retrieval-evaluation.md)
+(dataset 1.0.0: keyword comparator 5/8 vs document-order baseline 1/8,
+failures categorized). These numbers measure citation correctness only —
+not operational safety.
+
 ## Why MCP rather than a plugin
 
 A plugin works in one host. A skill works in one host. The Model Context Protocol works across all of them, and is the nearest thing the agent ecosystem has to a shared standard.

@@ -1,0 +1,26 @@
+{
+  "runbook_id": "backup-restore",
+  "revision": "2026-09-23.1",
+  "operation": {
+    "action": "restore",
+    "target": "n8n-backup"
+  },
+  "preconditions": [
+    {
+      "name": "service-stopped",
+      "expected": "true"
+    }
+  ],
+  "passages": [
+    {
+      "locator": "restore/steps",
+      "text": "stop n8n, restore the sqlite database file from the latest backup archive, then start n8n and watch the logs."
+    }
+  ],
+  "verification": {
+    "verifier": "alan",
+    "verified_at": "2026-09-23T09:00:00.000000+00:00",
+    "applicability": "alan's self-hosted docker host"
+  },
+  "content_hash": "f3ae11a6cb5b6a2cb23515990706831df711652b83718bb10a652bbece266c7b"
+}

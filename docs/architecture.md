@@ -27,10 +27,26 @@ The server persists the following logical records. This describes the required r
 
 ```mermaid
 erDiagram
+    RUNBOOK_REVISION ||--|{ PASSAGE : "contains"
+    PROPOSAL }o--|| RUNBOOK_REVISION : "cites evidence from"
     PROPOSAL ||--o| APPROVAL : "is authorized by"
     PROPOSAL ||--o| AUTHORIZATION : "uses"
     PROPOSAL ||--o{ AUDIT_RECORD : "creates"
     AUTHORIZATION ||--o{ AUDIT_RECORD : "is recorded in"
+    RUNBOOK_REVISION {
+        string runbook_id
+        string revision
+        string content_hash "SHA-256 of canonical body - changed hash voids citations"
+        string operation_action
+        string operation_target
+        string verification_verifier
+        datetime verification_verified_at
+        string applicability
+    }
+    PASSAGE {
+        string locator "unique within the revision"
+        string text
+    }
     PROPOSAL {
         string proposal_id
         blob invocation_bytes "canonical JCS bytes, immutable"
@@ -76,4 +92,4 @@ erDiagram
     }
 ```
 
-The proposal store is transactional (SQLite today) so that token consumption can commit atomically with the pre-execution audit append; the frozen-invocation and token contract is recorded in [ADR 0002](adr/0002-frozen-invocation-audit-contract.md). An approval is recorded only on the internal operator path, is single-use, and its recorded-to-used transition joins the token-consumption transaction ([ADR 0003](adr/0003-approval-verifier-boundary.md)). Audit events are insert-only with write-time redaction: sensitive values are replaced by an explicit redaction marker plus a keyed fingerprint; the audit interface exposes append and read only.
+The proposal store is transactional (SQLite today) so that token consumption can commit atomically with the pre-execution audit append; the frozen-invocation and token contract is recorded in [ADR 0002](adr/0002-frozen-invocation-audit-contract.md). An approval is recorded only on the internal operator path, is single-use, and its recorded-to-used transition joins the token-consumption transaction ([ADR 0003](adr/0003-approval-verifier-boundary.md)). Audit events are insert-only with write-time redaction: sensitive values are replaced by an explicit redaction marker plus a keyed fingerprint; the audit interface exposes append and read only. Runbook revisions are immutable and human-verified ([runbook format](runbook-format.md)): a citation qualifies as required procedural evidence only when it is bound to a revision whose content hash recomputes exactly — a changed hash voids the citation.

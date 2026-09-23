@@ -37,6 +37,17 @@ from ops_guard.errors import (
 )
 from ops_guard.invocation import Invocation
 from ops_guard.proposals import FrozenProposal, IssuedProposal, ProposalService
+from ops_guard.runbooks import (
+    CitedPassage,
+    Citation,
+    MalformedRunbookError,
+    RunbookRevision,
+    TamperedRunbookError,
+    UnknownPassageError,
+    UnverifiedRunbookError,
+    parse_revision,
+    resolve_citation,
+)
 from ops_guard.store import ProposalStore
 
 __all__ = [
@@ -53,17 +64,26 @@ __all__ = [
     "AuditLog",
     "AuditStore",
     "AuditWriteFailure",
+    "Citation",
+    "CitedPassage",
     "DEFAULT_SENSITIVE_KEYS",
     "FrozenProposal",
     "HostSuppliedApprovalError",
     "Invocation",
     "InvocationMismatchError",
     "IssuedProposal",
+    "MalformedRunbookError",
     "ProposalError",
     "ProposalService",
     "ProposalStore",
+    "RunbookRevision",
+    "TamperedRunbookError",
     "TokenAlreadyConsumedError",
     "TokenExpiredError",
+    "UnknownPassageError",
     "UnknownTokenError",
+    "UnverifiedRunbookError",
+    "parse_revision",
     "redact",
+    "resolve_citation",
 ]

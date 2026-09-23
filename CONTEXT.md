@@ -15,3 +15,9 @@ The 256-bit opaque single-use handle returned exactly once when a proposal is cr
 
 ### Approval record
 The server-recorded, single-use permission binding the configured operator to one frozen proposal, created only on the internal operator path and spent exactly when the proposal's token is consumed. Authority: [ADR 0003](docs/adr/0003-approval-verifier-boundary.md). Rejected alias: **"host approval"** — anything the proposing MCP host presents is by definition not an approval record and is rejected.
+
+### Audit event
+One append-only, versioned envelope recording an operational occurrence: gapless global sequence, event id, recorded timestamp, correlation and proposal references, invocation digest, evidence references, authorization path, redacted judge snapshot when present, redacted payload, and outcome or failure code. Every gate refusal, execution outcome, and unknown completion is one. Authority: the audit contract in `src/ops_guard/audit.py`. Rejected alias: **"log line"** — audit events are structured, sequenced, and required-for-execution, not free text.
+
+### Keyed fingerprint
+The truncated keyed HMAC persisted in place of a redacted sensitive value so the same value can be recognized later without being revealed. It is keyed with the operator's persistent audit key. Authority: the audit contract in `src/ops_guard/audit.py`. Rejected alias: **"token fingerprint"** — that phrase is reserved for the rejected idea that a token digest is an invocation identity (see Canonical invocation identity); a keyed fingerprint redacts a value and never identifies an invocation.

@@ -159,8 +159,11 @@ def test_malformed_authorizations_are_rejected() -> None:
     for mutation in (
         {"authorization_id": " "},
         {"script_sha256": "short"},
+        {"script_sha256": "g" * 64},
         {"runbook_revision_hash": None},
         {"arguments": [{"not": "a mapping"}]},
+        {"arguments": {"n": float("nan")}},
+        {"arguments": {1: "non-string-key"}},
         {"preconditions": "not-a-list"},
         {"unexpected": True},
     ):
@@ -170,6 +173,20 @@ def test_malformed_authorizations_are_rejected() -> None:
             parse_authorization(broken)
     with pytest.raises(MalformedAuthorizationError):
         parse_authorization({k: v for k, v in base.items() if k != "preconditions"})
+
+
+def test_match_never_raises_on_hostile_invocation_values() -> None:
+    """ADR 0004 rule 2: one result object reports matched or not. Hostile
+    values that cannot canonicalize report no-match instead of raising."""
+    authorization = parse_authorization(authorization_document())
+    for hostile in (
+        make_invocation(arguments={"n": float("inf")}),
+        make_invocation(arguments={"n": 10**400}),
+        make_invocation(arguments={"nested": {"deep": [1, {"deeper": [2]}] * 500}}),
+    ):
+        result = match(authorization, hostile, SCRIPT)
+        assert result.matched is False
+        assert result.reason
 
 
 def test_partial_arguments_never_match_a_complete_rule() -> None:

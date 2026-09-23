@@ -92,13 +92,17 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
     arguments = document.get("arguments")
     if not isinstance(arguments, Mapping):
         raise MalformedAuthorizationError("arguments must be a mapping")
+    # One snapshot: validate exactly the mapping that gets stored, so a
+    # hostile or mutating Mapping cannot pass validation with different
+    # values than the record will carry.
+    arguments = dict(arguments)
     try:
         # A permitted invocation must be exactly representable under the
         # same freeze contract as real invocations, and must canonicalize —
         # otherwise the rule could collide with a neighbouring literal or
         # crash the matcher.
-        ensure_json_representable(dict(arguments))
-        canonicalize_json(dict(arguments))
+        ensure_json_representable(arguments)
+        canonicalize_json(arguments)
     except (TypeError, ValueError, AttributeError, UnicodeEncodeError,
             RecursionError, OverflowError) as error:
         raise MalformedAuthorizationError(
@@ -147,19 +151,32 @@ def match(
     if not isinstance(invocation, Invocation):
         raise MalformedAuthorizationError("an invocation is required for matching")
 
+    try:
+        arguments_equal = (
+            canonicalize_json(dict(invocation.arguments))
+            == authorization.canonical_arguments()
+        )
+        preconditions_equal = (
+            canonicalize_json(list(invocation.preconditions))
+            == authorization.canonical_preconditions()
+        )
+    except (TypeError, ValueError, AttributeError, UnicodeEncodeError,
+            RecursionError, OverflowError) as error:
+        # ADR 0004 rule 2: the match reports matched or not. An invocation
+        # that cannot be canonicalized under the freeze contract never
+        # matches.
+        return MatchResult(
+            matched=False,
+            authorization_id=authorization.authorization_id,
+            reason=f"invocation cannot be canonicalized: {error}",
+        )
     checks = (
         ("script_path", script.path == authorization.script_path),
         ("script_sha256", hmac_eq(script.sha256, authorization.script_sha256)),
         ("action", invocation.action == authorization.action),
         ("target", invocation.target == authorization.target),
-        (
-            "arguments",
-            canonicalize_json(dict(invocation.arguments)) == authorization.canonical_arguments(),
-        ),
-        (
-            "preconditions",
-            canonicalize_json(list(invocation.preconditions)) == authorization.canonical_preconditions(),
-        ),
+        ("arguments", arguments_equal),
+        ("preconditions", preconditions_equal),
         (
             "runbook_revision_hash",
             hmac_eq(invocation.runbook_revision_hash, authorization.runbook_revision_hash),

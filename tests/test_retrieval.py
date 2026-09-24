@@ -274,3 +274,25 @@ def test_failing_search_recording_returns_no_results(tmp_path, clock) -> None:
         _call(server, {"question": "restart n8n"})
     # Fail-closed: nothing was returned and nothing was half-recorded.
     assert audit.events() == []
+
+
+def test_second_append_failure_rolls_back_the_whole_pair(tmp_path, clock) -> None:
+    """The request event must not survive without its guidance event when the
+    second append fails after the first INSERT succeeded (issue #40)."""
+    path = str(tmp_path / "ops-guard.db")
+    store = AuditStore(path)
+
+    class GuidanceFailsAudit(AuditLog):
+        def append_on(self, conn, event_type, **kwargs):
+            if event_type == "guidance":
+                raise AuditWriteFailure("required audit append failed: injected")
+            return super().append_on(conn, event_type, **kwargs)
+
+    audit = GuidanceFailsAudit(store, fingerprint_key=os.urandom(32), clock=clock)
+    library, _ = library_with(VALID_RUNBOOK)
+    server = build_mcp_server(library, audit)
+    with pytest.raises(Exception):
+        _call(server, {"question": "restart n8n"})
+    # The first INSERT was executed inside the transaction — the rollback
+    # must have discarded it: no request event without its guidance pair.
+    assert audit.events() == []

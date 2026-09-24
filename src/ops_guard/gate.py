@@ -20,6 +20,7 @@ module: it cannot authorize execution.
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -257,10 +258,24 @@ class ExecutionGate:
                 raise ValueError(
                     f"executor must report success or unknown, got {reported!r}"
                 )
-        except BaseException as error:  # noqa: BLE001 - failure is an outcome
+        except (TimeoutError, subprocess.TimeoutExpired):
+            # A timeout leaves completion unconfirmed: explicitly unknown,
+            # never a known failure (issue #38).
             self._audit.append(
                 "execution_outcome",
-                payload={"outcome": "failure", "error": f"{type(error).__name__}: {error}"},
+                payload={"outcome": "unknown"},
+                correlation_id=frozen.proposal_id,
+                proposal_ref=frozen.proposal_id,
+                invocation_digest=frozen.invocation_digest,
+                authorization_path=path,
+                outcome="unknown",
+                failure_code="executor-timeout",
+            )
+            raise
+        except BaseException:  # noqa: BLE001 - failure is an outcome
+            self._audit.append(
+                "execution_outcome",
+                payload={"outcome": "failure"},
                 correlation_id=frozen.proposal_id,
                 proposal_ref=frozen.proposal_id,
                 invocation_digest=frozen.invocation_digest,

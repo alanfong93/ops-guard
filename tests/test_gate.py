@@ -221,6 +221,78 @@ def test_executor_failure_is_recorded_then_raised(harness: Harness) -> None:
     assert failure[-1].failure_code == "executor-error"
 
 
+def test_executor_timeout_is_recorded_as_unknown_without_exception_text(harness: Harness) -> None:
+    """A timeout leaves completion unconfirmed: unknown, never failure, and
+    the exception text (which may carry secrets) is not persisted (issue #38)."""
+    issued = harness.issue()
+    secret = "healthcheck token=super-secret-value"
+
+    def timing_out_executor(invocation: Invocation) -> str:
+        harness.executor_calls.append(invocation)
+        raise TimeoutError(f"no healthy reply within 30s using {secret}")
+
+    with pytest.raises(TimeoutError):
+        harness.gate.execute(make_request(token=issued.token), timing_out_executor)
+
+    outcome = [e for e in harness.audit.events() if e.event_type == "execution_outcome"][-1]
+    assert outcome.outcome == "unknown"
+    assert outcome.failure_code == "executor-timeout"
+    persisted = json.dumps(outcome.payload)
+    assert "super-secret-value" not in persisted
+    assert "no healthy reply" not in persisted
+    assert "TimeoutError" not in persisted
+
+
+def test_subprocess_timeout_is_recorded_as_unknown_without_command_text(harness: Harness) -> None:
+    import subprocess
+
+    issued = harness.issue()
+
+    def timing_out_executor(invocation: Invocation) -> str:
+        harness.executor_calls.append(invocation)
+        raise subprocess.TimeoutExpired(
+            cmd="/opt/scripts/restart-n8n.sh --healthcheck-url http://10.0.0.2:5678",
+            timeout=30,
+        )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        harness.gate.execute(make_request(token=issued.token), timing_out_executor)
+
+    outcome = [e for e in harness.audit.events() if e.event_type == "execution_outcome"][-1]
+    assert outcome.outcome == "unknown"
+    assert outcome.failure_code == "executor-timeout"
+    persisted = json.dumps(outcome.payload)
+    assert "restart-n8n.sh" not in persisted
+    assert "10.0.0.2" not in persisted
+
+
+def test_ordinary_exception_stays_failure_and_persists_no_exception_text(harness: Harness) -> None:
+    issued = harness.issue()
+
+    def failing_executor(invocation: Invocation) -> str:
+        harness.executor_calls.append(invocation)
+        try:
+            raise ValueError("inner api-key=sk-secret-123 refused")
+        except ValueError as inner:
+            raise RuntimeError("outer connection to 10.0.0.9 lost") from inner
+
+    with pytest.raises(RuntimeError):
+        harness.gate.execute(make_request(token=issued.token), failing_executor)
+
+    outcome = [e for e in harness.audit.events() if e.event_type == "execution_outcome"][-1]
+    assert outcome.outcome == "failure"
+    assert outcome.failure_code == "executor-error"
+    persisted = json.dumps(outcome.payload)
+    # No message, no nested cause, no traceback, no exception class name.
+    assert "sk-secret-123" not in persisted
+    assert "10.0.0.9" not in persisted
+    assert "inner" not in persisted
+    assert "outer" not in persisted
+    assert "ValueError" not in persisted
+    assert "RuntimeError" not in persisted
+    assert "Traceback" not in persisted
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

@@ -105,7 +105,18 @@ class ExecutionGate:
         """Run every gate; dispatch only after the durable transaction commits.
 
         ``executor`` receives the frozen invocation and returns "success" or
-        "unknown"; a raised exception is recorded as "failure".
+        "unknown". An exception from the executor run or its report
+        validation is recorded as follows: timeouts (``TimeoutError``,
+        ``subprocess.TimeoutExpired``) leave completion unconfirmed and are
+        recorded as explicitly "unknown" with code ``executor-timeout``;
+        every other exception is recorded as "failure" with code
+        ``executor-error``, including the ``ValueError`` raised here when
+        the report is neither "success" nor "unknown" and ``BaseException``
+        subclasses such as ``KeyboardInterrupt`` and ``SystemExit``. The
+        classified exception then propagates unchanged; if the outcome
+        append cannot persist, ``AuditWriteFailure`` propagates instead,
+        carrying the original exception as ``__context__`` (the module
+        docstring documents this window).
         """
         proposal_id: str | None = None
 

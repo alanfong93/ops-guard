@@ -46,6 +46,7 @@ from ops_guard.errors import (
     UnknownTokenError,
 )
 from ops_guard.invocation import Invocation, canonicalize_json
+from ops_guard.owner import ExecutionOwner, owners_dir_for
 from ops_guard.proposals import ProposalService
 from ops_guard.retrieval import RunbookLibrary
 from ops_guard.runbooks import (
@@ -88,6 +89,7 @@ class ExecutionGate:
         runbooks: RunbookLibrary,
         script_source: Callable[[str], bytes],
         clock: Callable[[], datetime],
+        owner: ExecutionOwner | None = None,
     ) -> None:
         # One durable transaction boundary (issue #36): the execution-start
         # append joins the token-consume transaction on the proposal store's
@@ -112,6 +114,12 @@ class ExecutionGate:
         self._audit = audit
         self._runbooks = runbooks
         self._script_source = script_source
+        # Owner identity for crash recovery (issue #39; ADR 0005): every
+        # execution-start record names the gate process instance that
+        # dispatched it, and that instance holds its lock for its lifetime.
+        self._owner = owner if owner is not None else ExecutionOwner(
+            owners_dir_for(audit.store.path)
+        )
         self._clock = clock
 
     def execute(
@@ -274,6 +282,7 @@ class ExecutionGate:
                     "phase": "pre-execution",
                     "script_path": resolved_script.path,
                     "script_sha256": resolved_script.sha256,
+                    "owner_id": self._owner.id,
                 },
                 correlation_id=frozen.proposal_id,
                 proposal_ref=frozen.proposal_id,

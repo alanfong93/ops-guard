@@ -190,6 +190,11 @@ class AuditStore:
         finally:
             conn.close()
 
+    @property
+    def path(self) -> str:
+        """The database file this store persists to (store-pairing validation)."""
+        return self._path
+
     def _local_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=30.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
@@ -287,6 +292,12 @@ class AuditLog:
         self._fingerprint_key = fingerprint_key
         self._sensitive_keys = sensitive_keys
         self._clock = clock
+
+    @property
+    def store(self) -> AuditStore:
+        """The persistence store, so gate configuration can validate that
+        proposal and audit records share one database boundary (issue #36)."""
+        return self._store
 
     def _validate(self, event_type, payload, evidence_refs, outcome):
         """Cheap caller validation; runs outside the write-failure wrapper."""

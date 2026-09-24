@@ -7,6 +7,7 @@ consumption can commit atomically with the pre-execution audit append.
 
 from __future__ import annotations
 
+import os.path
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -165,11 +166,32 @@ class GuardedConnection:
 AuditAppend = Callable[[GuardedConnection], None]
 
 
+def same_database(left: str, right: str) -> bool:
+    """True when two store paths denote one SQLite database file.
+
+    Comparison is over absolute, case-normalized paths so relative and
+    differently-cased spellings of the same file match. ``:memory:`` is
+    never the same database as anything — every connection to it is a
+    separate, empty database — so a memory-backed store always fails this
+    check (fail-closed, issue #36).
+    """
+    if str(left).strip().lower() == ":memory:" or str(right).strip().lower() == ":memory:":
+        return False
+    return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+        os.path.abspath(str(right))
+    )
+
+
 class ProposalStore:
     """File-backed store; one short-lived connection per operation."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = str(path)
+
+    @property
+    def path(self) -> str:
+        """The database file this store persists to (store-pairing validation)."""
+        return self._path
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=30.0, isolation_level=None)

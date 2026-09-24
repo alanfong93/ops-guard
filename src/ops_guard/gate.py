@@ -29,6 +29,7 @@ from ops_guard.audit import AuditLog, AuditWriteFailure
 from ops_guard.authorization import ScriptIdentity, StandingAuthorization, match
 from ops_guard.errors import (
     ApprovalError,
+    GateConfigurationError,
     InvocationMismatchError,
     ProposalError,
     TokenAlreadyConsumedError,
@@ -45,7 +46,7 @@ from ops_guard.runbooks import (
     UnverifiedRunbookError,
     resolve_citation,
 )
-from ops_guard.store import AuditAppend
+from ops_guard.store import AuditAppend, same_database
 
 _OUTCOMES = {"success", "unknown"}
 
@@ -80,6 +81,16 @@ class ExecutionGate:
         *,
         clock: Callable[[], datetime],
     ) -> None:
+        # One durable transaction boundary (issue #36): the execution-start
+        # append joins the token-consume transaction on the proposal store's
+        # connection, so a split audit database can never be configured.
+        # Validation runs here, at initialization — a mismatched gate is
+        # rejected before any operation can be dispatched.
+        if not same_database(proposals.store.path, audit.store.path):
+            raise GateConfigurationError(
+                "audit store must share the proposal database: "
+                f"proposals={proposals.store.path!r}, audit={audit.store.path!r}"
+            )
         self._proposals = proposals
         self._approvals = approvals
         self._audit = audit

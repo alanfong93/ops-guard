@@ -26,7 +26,7 @@ from ops_guard.errors import (
     InvocationMismatchError,
 )
 from ops_guard.proposals import ProposalService, format_timestamp
-from ops_guard.store import AuditAppend
+from ops_guard.store import AuditAppend, same_database
 
 _APPROVAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS approvals (
@@ -98,6 +98,11 @@ class ApprovalStore:
         finally:
             conn.close()
 
+    @property
+    def path(self) -> str:
+        """The database file this store persists to (store-pairing validation)."""
+        return self._path
+
     def _local_conn(self) -> sqlite3.Connection:
         return _connect(self._path)
 
@@ -165,7 +170,7 @@ class ApprovalVerifier:
     ) -> None:
         if not operator_identity:
             raise ValueError("operator_identity must be a non-empty configured identity")
-        if store._path != proposals.store._path:
+        if not same_database(store.path, proposals.store.path):
             raise ValueError(
                 "ApprovalStore and the proposal service must share one database"
             )

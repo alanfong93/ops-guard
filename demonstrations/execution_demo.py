@@ -33,16 +33,14 @@ from ops_guard import (  # noqa: E402
     Invocation,
     ProposalService,
     ProposalStore,
+    ScriptIdentity,
     parse_authorization,
 )
-from ops_guard.retrieval import RunbookLibrary  # noqa: E402
 from ops_guard.invocation import canonicalize_json  # noqa: E402
 from ops_guard.runbooks import parse_revision  # noqa: E402
 
 OPERATOR = "alan"
-SCRIPT_PATH = "/opt/scripts/restart-n8n.sh"
-SCRIPT_BYTES = b"#!/bin/sh\necho restarting n8n\n"
-SCRIPT_SHA256 = hashlib.sha256(SCRIPT_BYTES).hexdigest()
+SCRIPT = ScriptIdentity(path="/opt/scripts/restart-n8n.sh", sha256="a" * 64)
 
 
 def _verified_runbook() -> dict:
@@ -68,8 +66,7 @@ def run_demonstration() -> dict:
     """Execute every scenario; return the ordered demonstration trace."""
     runbook = _verified_runbook()
     revision_hash = runbook["content_hash"]
-    library, _rejections = RunbookLibrary.load([runbook])
-    scripts: dict[str, bytes] = {SCRIPT_PATH: SCRIPT_BYTES}
+    parsed = parse_revision(runbook)
 
     import os as _os
 
@@ -80,15 +77,12 @@ def run_demonstration() -> dict:
     audit = AuditLog(AuditStore(path), fingerprint_key=_os.urandom(32), clock=clock)
     service = ProposalService(ProposalStore(path), token_key=_os.urandom(32), clock=clock, audit=audit)
     verifier = ApprovalVerifier(ApprovalStore(path), service, operator_identity=OPERATOR, clock=clock)
-    gate = ExecutionGate(
-        service, verifier, audit,
-        runbooks=library, script_source=scripts.__getitem__, clock=clock,
-    )
+    gate = ExecutionGate(service, verifier, audit, clock=clock)
 
     standing = parse_authorization({
         "authorization_id": "auth-restart-n8n",
-        "script_path": SCRIPT_PATH,
-        "script_sha256": SCRIPT_SHA256,
+        "script_path": SCRIPT.path,
+        "script_sha256": SCRIPT.sha256,
         "action": "restart",
         "target": "n8n",
         "arguments": {"service": "n8n", "timeout_seconds": 30},
@@ -120,18 +114,19 @@ def run_demonstration() -> dict:
 
     harness_executor_calls: list[Invocation] = []
 
-    def executor(invocation: Invocation, script_bytes: bytes) -> str:
-        harness_executor_calls.append((invocation, script_bytes))
+    def executor(invocation: Invocation) -> str:
+        harness_executor_calls.append(invocation)
         return "success"
 
-    def unknown_executor(invocation: Invocation, script_bytes: bytes) -> str:
-        harness_executor_calls.append((invocation, script_bytes))
+    def unknown_executor(invocation: Invocation) -> str:
+        harness_executor_calls.append(invocation)
         return "unknown"
 
     def request(token: str, **overrides) -> ExecutionRequest:
         fields = dict(
             token=token,
-            script_path=SCRIPT_PATH,
+            script=SCRIPT,
+            runbook_document=runbook,
             citation=citation,
             observed_preconditions={"healthcheck": "passing"},
             operator_identity=OPERATOR,
@@ -157,17 +152,9 @@ def run_demonstration() -> dict:
 
     # 3. Missing-evidence refusal.
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
-    # A well-formed citation whose revision the library never verified:
-    # caller-supplied documents are no longer consulted at all (issue #34).
-    missing_citation = Citation(
-        runbook_id=runbook["runbook_id"], revision=runbook["revision"],
-        content_hash="c" * 64, locator="restart/steps",
-    )
-    scenario("missing-evidence-refusal", request(issued.token, citation=missing_citation))
+    scenario("missing-evidence-refusal", request(issued.token, runbook_document={}))
 
     # 4. Stale-evidence refusal (a different verified revision than frozen).
-    # A different, fully valid revision that the operator never loaded:
-    # the gate refuses because the library does not carry it (issue #34).
     stale = json.loads(json.dumps(runbook))
     stale["revision"] = "2026-09-23.2"
     stale["passages"][0]["text"] = "a procedure the proposal never froze"
@@ -177,7 +164,7 @@ def run_demonstration() -> dict:
         runbook_id=stale["runbook_id"], revision=stale["revision"],
         content_hash=stale["content_hash"], locator="restart/steps",
     )
-    scenario("stale-evidence-refusal", request(issued.token, citation=stale_citation))
+    scenario("stale-evidence-refusal", request(issued.token, runbook_document=stale, citation=stale_citation))
 
     # 5. Failed-precondition refusal.
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
@@ -194,10 +181,7 @@ def run_demonstration() -> dict:
     audit = AuditLog(AuditStore(path), fingerprint_key=_os.urandom(32), clock=clock)
     service = ProposalService(ProposalStore(path), token_key=_os.urandom(32), clock=clock, audit=audit)
     verifier = ApprovalVerifier(ApprovalStore(path), service, operator_identity=OPERATOR, clock=clock)
-    gate = ExecutionGate(
-        service, verifier, audit,
-        runbooks=library, script_source=scripts.__getitem__, clock=clock,
-    )
+    gate = ExecutionGate(service, verifier, audit, clock=clock)
 
     # 8. Audit-write refusal (execution-start append fails; nothing runs).
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))

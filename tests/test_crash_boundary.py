@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import timedelta
 
@@ -265,3 +266,193 @@ def test_consume_and_audit_append_commit_atomically(db_path, token_key, clock) -
 
     with pytest.raises(TokenAlreadyConsumedError):
         service.consume(issued.token)
+
+
+# --- Owner recovery (issue #39; ADR 0005) ---------------------------------
+
+
+def _recovery_wiring(db_path, token_key, clock, owner):
+    import os as _os
+
+    from ops_guard import (
+        ApprovalStore,
+        ApprovalVerifier,
+        AuditLog,
+        AuditStore,
+        Citation,
+        ExecutionGate,
+        ExecutionRequest,
+    )
+    from ops_guard.retrieval import RunbookLibrary
+    from tests_helpers_runbook import VALID_RUNBOOK
+
+    audit = AuditLog(AuditStore(str(db_path)), fingerprint_key=_os.urandom(32), clock=clock)
+    service = make_service(db_path, token_key=token_key, clock=clock, audit=audit)
+    verifier = ApprovalStore(str(db_path))
+    from ops_guard import ApprovalVerifier as _AV
+
+    verifier = _AV(ApprovalStore(str(db_path)), service, operator_identity="alan", clock=clock)
+    library, _ = RunbookLibrary.load([VALID_RUNBOOK])
+    scripts = {"/opt/scripts/restart-n8n.sh": b"#!/bin/sh\n"}
+    gate = ExecutionGate(
+        service,
+        verifier,
+        audit,
+        runbooks=library,
+        script_source=scripts.__getitem__,
+        clock=clock,
+        owner=owner,
+    )
+    citation = Citation(
+        runbook_id=VALID_RUNBOOK["runbook_id"],
+        revision=VALID_RUNBOOK["revision"],
+        content_hash=VALID_RUNBOOK["content_hash"],
+        locator="restart/steps",
+    )
+    authorization = None
+    return audit, service, verifier, gate, citation, authorization
+
+
+def _dispatch_crash(audit, verifier, gate, service, citation):
+    """Commit execution_start, then fail the outcome append: the documented
+    crash window (start durable, token consumed, no terminal outcome)."""
+    from ops_guard import AuditWriteFailure, ExecutionRequest
+    from tests_helpers_runbook import VALID_RUNBOOK as _RB
+
+    issued = service.open_proposal(
+        make_invocation(runbook_revision_hash=_RB["content_hash"]),
+        ttl=timedelta(minutes=5),
+    )
+    verifier.record_approval(issued.token, operator_identity="alan")
+    real = audit.append_on
+
+    def failing(conn, event_type, **kwargs):
+        if event_type == "execution_outcome":
+            raise AuditWriteFailure("crash before the outcome append")
+        return real(conn, event_type, **kwargs)
+
+    audit.append_on = failing  # type: ignore[method-assign]
+    try:
+        request = ExecutionRequest(
+            token=issued.token,
+            script_path="/opt/scripts/restart-n8n.sh",
+            citation=citation,
+            observed_preconditions={"healthcheck": "passing"},
+            operator_identity="alan",
+        )
+        gate.execute(request, lambda invocation, script_bytes: "success")
+    except AuditWriteFailure:
+        pass  # the crash window: start is durable, no outcome exists
+    finally:
+        audit.append_on = real  # type: ignore[method-assign]
+    return issued
+
+
+def test_recovery_records_exactly_one_unknown_for_proven_dead_owner(
+    db_path, token_key, clock
+) -> None:
+    from ops_guard import ExecutionOwner
+    from ops_guard.recovery import reconcile_interrupted_executions
+
+    owners_dir = os.path.join(str(db_path) + ".owners")
+    owner = ExecutionOwner(owners_dir)
+    audit, service, verifier, gate, citation, _ = _recovery_wiring(
+        db_path, token_key, clock, owner
+    )
+    _dispatch_crash(audit, verifier, gate, service, citation)
+    owner.close()  # the process dies: its lock becomes acquirable
+
+    recovered = reconcile_interrupted_executions(audit)
+    assert [r.action for r in recovered] == ["recovered"]
+
+    events = audit.events()
+    outcomes = [e for e in events if e.event_type == "execution_outcome"]
+    assert len(outcomes) == 1
+    assert outcomes[0].outcome == "unknown"
+    assert outcomes[0].failure_code == "owner-dead"
+
+    # Idempotent: a repeat sweep finds the terminal outcome and appends nothing.
+    assert reconcile_interrupted_executions(audit) == []
+    outcomes_after = [e for e in audit.events() if e.event_type == "execution_outcome"]
+    assert len(outcomes_after) == 1
+
+
+def test_recovery_leaves_live_owner_unresolved(db_path, token_key, clock) -> None:
+    from ops_guard import ExecutionOwner
+    from ops_guard.recovery import reconcile_interrupted_executions
+
+    owners_dir = os.path.join(str(db_path) + ".owners")
+    owner = ExecutionOwner(owners_dir)
+    audit, service, verifier, gate, citation, _ = _recovery_wiring(
+        db_path, token_key, clock, owner
+    )
+    _dispatch_crash(audit, verifier, gate, service, citation)
+    # The owner is still alive: its lock stays held by this wiring.
+
+    reconciliations = reconcile_interrupted_executions(audit)
+    assert [r.action for r in reconciliations] == ["alive"]
+    assert [e for e in audit.events() if e.event_type == "execution_outcome"] == []
+    owner.close()
+
+
+def test_recovery_leaves_indeterminate_owner_unresolved(db_path, token_key, clock) -> None:
+    import os as _os
+
+    from ops_guard import ExecutionOwner
+    from ops_guard.recovery import reconcile_interrupted_executions
+
+    owners_dir = os.path.join(str(db_path) + ".owners")
+    owner = ExecutionOwner(owners_dir)
+    audit, service, verifier, gate, citation, _ = _recovery_wiring(
+        db_path, token_key, clock, owner
+    )
+    _dispatch_crash(audit, verifier, gate, service, citation)
+    owner.close()  # release, so the platform allows removing the file
+    _os.remove(owner.lock_path)  # lock state lost: proof is impossible
+
+    reconciliations = reconcile_interrupted_executions(audit)
+    assert [r.action for r in reconciliations] == ["indeterminate"]
+    assert [e for e in audit.events() if e.event_type == "execution_outcome"] == []
+    owner.close()
+
+
+def test_recovery_never_touches_a_terminal_outcome(db_path, token_key, clock) -> None:
+    import os as _os
+
+    from ops_guard import ExecutionOwner
+    from ops_guard.recovery import reconcile_interrupted_executions
+    from tests_helpers_runbook import VALID_RUNBOOK as _RB
+
+    owners_dir = os.path.join(str(db_path) + ".owners")
+    owner = ExecutionOwner(owners_dir)
+    audit, service, verifier, gate, citation, _ = _recovery_wiring(
+        db_path, token_key, clock, owner
+    )
+    from tests_helpers_runbook import VALID_RUNBOOK as _RB
+
+    issued = service.open_proposal(
+        make_invocation(runbook_revision_hash=_RB["content_hash"]),
+        ttl=timedelta(minutes=5),
+    )
+    verifier.record_approval(issued.token, operator_identity="alan")
+    from ops_guard import Citation, ExecutionRequest
+
+    request = ExecutionRequest(
+        token=issued.token,
+        script_path="/opt/scripts/restart-n8n.sh",
+        citation=Citation(
+            runbook_id=_RB["runbook_id"],
+            revision=_RB["revision"],
+            content_hash=_RB["content_hash"],
+            locator="restart/steps",
+        ),
+        observed_preconditions={"healthcheck": "passing"},
+        operator_identity="alan",
+    )
+    outcome = gate.execute(request, lambda invocation, script_bytes: "success")
+    assert outcome.dispatched
+
+    assert reconcile_interrupted_executions(audit) == []
+    outcomes = [e for e in audit.events() if e.event_type == "execution_outcome"]
+    assert [o.outcome for o in outcomes] == ["success"]
+    owner.close()

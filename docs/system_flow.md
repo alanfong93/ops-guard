@@ -32,3 +32,27 @@ flowchart TD
 ```
 
 The judge may attach an advisory risk assessment to a proposal, but it does not alter any gate in this flow and cannot authorize execution. Search requests and returned guidance are recorded as correlated `request` and `guidance` events before results are returned; the question is fingerprinted with a keyed HMAC, never stored raw, and the guidance references reconstruct the returned evidence from the verified revision. Proposal creation records a `proposal` event in the same transaction as the frozen-proposal insert, before the token is returned; a recording failure rolls back the creation. Proposal-bound approval is recorded and verified by the internal approval verifier (docs/adr/0003-approval-verifier-boundary.md): the proposing host cannot supply it, and the approval is spent exactly when its token is consumed. Standing authorization (docs/adr/0004-exact-standing-authorization.md) matches the frozen invocation against the complete permitted invocation — verified script identity, action, target, arguments, preconditions, runbook revision hash — as exact equality; missing or unequal fields never match, and there are no wildcards. The gate resolves its own artifacts before anything is consumed (docs/adr/0004-exact-standing-authorization.md, issue #34): the cited revision must come from the verified runbook library and the script bytes from the operator's authoritative source — the SHA-256 of those exact bytes is the only script digest the match and the provenance record use, and the executor runs on exactly those bytes. Audit events are insert-only and redacted at write time; the pre-execution append commits in the same durable transaction as the token consumption, so a required audit failure refuses the execution. Runbook revisions are immutable and human-verified (docs/runbook-format.md); cited guidance qualifies as required procedural evidence only when bound to an unchanged revision. This entire flow is enforced by the execution gate (`src/ops_guard/gate.py`), which records a refusal for every failed check before any side effect.
+
+## Recovery Flow
+
+A committed `execution_start` whose terminal outcome never landed is ambiguous: the owning process may have crashed, or the operation may still be running in another gate process (docs/adr/0005-execution-owner-recovery.md). Recovery resolves the ambiguity by proof, never by guessing.
+
+```mermaid
+flowchart TD
+    SWEEP["Recovery sweep runs"] --> STARTS{"Committed execution_start without a terminal outcome?"}
+    STARTS -->|"No"| DONE["Nothing to do"]
+    STARTS -->|"Yes"| PROBE["Probe the recorded owner's lock non-blockingly"]
+    PROBE -->|"Held: owner alive"| UNRESOLVED["Leave unresolved — never guess"]
+    PROBE -->|"Missing or unusable: indeterminate"| UNRESOLVED
+    PROBE -->|"Acquirable: owner proven dead"| CHECK{"Terminal outcome already present?"}
+    CHECK -->|"Yes"| STANDS["Append nothing — outcome stands"]
+    CHECK -->|"No"| UNKNOWN["Append exactly one unknown outcome, failure_code owner-dead, in the same transaction as the check"]
+    UNKNOWN --> NEVER["Never retry or re-execute the operation"]
+    UNKNOWN --> AUDIT_LOG
+    STANDS --> AUDIT_LOG
+
+    style UNRESOLVED fill:#fff3cd,stroke:#b58900,color:#000
+    style UNKNOWN fill:#bbf7d0,stroke:#166534,color:#000
+```
+
+Each execution-start record names the gate process instance (a random owner ID, not a PID) that dispatched it; that instance holds an OS exclusive lock file for its lifetime, so acquiring the lock later is positive proof the owner is gone. The sweep is idempotent — a recovered execution carries its terminal outcome and is never touched again.

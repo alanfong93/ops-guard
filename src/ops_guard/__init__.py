@@ -47,7 +47,9 @@ from ops_guard.errors import (
     UnknownTokenError,
 )
 from ops_guard.invocation import Invocation
+from ops_guard.owner import ExecutionOwner, owners_dir_for
 from ops_guard.proposals import FrozenProposal, IssuedProposal, ProposalService
+from ops_guard.recovery import Reconciliation, reconcile_interrupted_executions
 from ops_guard.runbooks import (
     CitedPassage,
     Citation,
@@ -82,6 +84,8 @@ __all__ = [
     "ExecutionRequest",
     "FrozenProposal",
     "FrozenInvocationTamperedError",
+    "ExecutionOwner",
+    "FrozenInvocationTamperedError",
     "GateConfigurationError",
     "GateOutcome",
     "HostSuppliedApprovalError",
@@ -92,6 +96,9 @@ __all__ = [
     "MalformedAuthorizationError",
     "MatchResult",
     "ProposalError",
+    "reconcile_interrupted_executions",
+    "Reconciliation",
+    "owners_dir_for",
     "ProposalService",
     "ProposalStore",
     "RunbookRevision",

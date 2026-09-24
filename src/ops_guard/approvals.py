@@ -26,7 +26,7 @@ from ops_guard.errors import (
     InvocationMismatchError,
 )
 from ops_guard.proposals import ProposalService, format_timestamp
-from ops_guard.store import AuditAppend, same_database
+from ops_guard.store import AuditAppend, database_path, same_database
 
 _APPROVAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS approvals (
@@ -91,7 +91,7 @@ class ApprovalStore:
     """
 
     def __init__(self, path: str) -> None:
-        self._path = str(path)
+        self._path = database_path(path)
         conn = self._local_conn()
         try:
             conn.executescript(_APPROVAL_SCHEMA)

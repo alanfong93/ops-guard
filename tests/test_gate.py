@@ -117,6 +117,21 @@ def test_successful_standing_dispatch_consumes_and_records(harness: Harness) -> 
     assert events[0].proposal_ref == issued.proposal_id
 
 
+def test_store_database_identity_is_pinned_at_construction(tmp_path, monkeypatch) -> None:
+    """A cwd change after store construction must not merge two databases
+    into one validated boundary (issue #36, adversarial finding)."""
+    from ops_guard.store import same_database
+
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    proposal_store = ProposalStore("ops-guard.db")
+    monkeypatch.chdir(second)
+    audit_store = AuditStore("ops-guard.db")
+    assert not same_database(proposal_store.path, audit_store.path)
+
+
 def test_gate_rejects_split_audit_store_before_any_dispatch(tmp_path, token_key, clock) -> None:
     """One execution history must live in one database (issue #36)."""
     proposal_path = str(tmp_path / "ops-guard.db")

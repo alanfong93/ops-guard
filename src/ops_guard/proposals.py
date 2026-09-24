@@ -177,6 +177,27 @@ class ProposalService:
             self._check(row, digest, expected_digest, self._now())
             return _row_to_proposal(row)
 
+    def resolve_on(
+        self,
+        conn: sqlite3.Connection,
+        token: str,
+        *,
+        expected_digest: str | None = None,
+    ) -> FrozenProposal:
+        """Eligibility check against a caller-owned transaction's view (issue #35).
+
+        Same rejections as ``resolve``, but the row is read from ``conn`` —
+        the caller's write transaction — so the verdict reflects the state
+        the rest of that transaction will pair with, not a pre-transaction
+        snapshot that a concurrent consume can invalidate.
+        """
+        digest = self._token_digest(token)
+        row = conn.execute(
+            "SELECT * FROM proposals WHERE token_digest = ?", (digest,)
+        ).fetchone()
+        self._check(row, digest, expected_digest, self._now())
+        return _row_to_proposal(row)
+
     def consume(
         self,
         token: str,

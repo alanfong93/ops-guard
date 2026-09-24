@@ -82,6 +82,39 @@ def test_stale_source_content_never_qualifies() -> None:
         resolve_citation(document, results[0].citation())
 
 
+def test_mutating_source_preconditions_after_load_cannot_change_results() -> None:
+    document = copy.deepcopy(VALID_RUNBOOK)
+    library, _ = library_with(document)
+    document["preconditions"][0]["expected"] = "mutated"
+    for result in library.search("restart n8n healthcheck"):
+        assert result.preconditions == ({"name": "healthcheck", "expected": "passing"},)
+
+
+def test_mutating_a_returned_result_cannot_change_the_library_or_later_results() -> None:
+    library, _ = library_with(VALID_RUNBOOK)
+    first = library.search("restart n8n healthcheck")
+    assert first, "matching question must return evidence"
+    first[0].preconditions[0]["expected"] = "mutated"
+    again = library.search("restart n8n healthcheck")
+    assert again
+    for result in again:
+        assert result.preconditions == ({"name": "healthcheck", "expected": "passing"},)
+        assert result.content_hash == VALID_RUNBOOK["content_hash"]
+
+
+def test_mcp_conversion_hands_out_detached_preconditions() -> None:
+    from ops_guard.retrieval import _result_to_dict
+
+    library, _ = library_with(VALID_RUNBOOK)
+    evidence = _result_to_dict(library.search("restart n8n healthcheck")[0])
+    evidence["preconditions"][0]["expected"] = "mutated"
+    for result in library.search("restart n8n healthcheck"):
+        assert result.preconditions == ({"name": "healthcheck", "expected": "passing"},)
+        assert _result_to_dict(result)["preconditions"] == [
+            {"name": "healthcheck", "expected": "passing"}
+        ]
+
+
 def test_irrelevant_question_returns_no_evidence() -> None:
     library, _ = library_with(VALID_RUNBOOK)
     assert library.search("bake sourdough bread") == []

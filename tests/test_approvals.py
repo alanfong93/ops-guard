@@ -18,7 +18,9 @@ from ops_guard import (
     ApprovalStore,
     ApprovalVerifier,
     HostSuppliedApprovalError,
+    FrozenInvocationTamperedError,
     InvocationMismatchError,
+    ProposalError,
     ProposalService,
     TokenAlreadyConsumedError,
     TokenExpiredError,
@@ -137,8 +139,12 @@ def test_consumed_or_unknown_tokens_cannot_be_approved(service, verifier) -> Non
 def test_tampered_binding_fails_closed(service, verifier) -> None:
     tamper_legs = [
         lambda pid, digest: (
+            # Tampering the stored digest column now trips the re-derivation
+            # of the digest from the frozen bytes (issue #20) — a typed,
+            # more precise rejection than the binding mismatch it used to
+            # surface as.
             f"UPDATE proposals SET invocation_digest = '{'f' * 64}' WHERE proposal_id = '{pid}'",
-            InvocationMismatchError,
+            FrozenInvocationTamperedError,
         ),
         lambda pid, digest: (
             f"UPDATE proposals SET expires_at = '2099-01-01T00:00:00.000000+00:00' "
@@ -473,3 +479,32 @@ def test_flip_cannot_ride_a_different_tokens_consume(service, verifier) -> None:
     finally:
         conn.close()
     assert row is not None and row[0] == "recorded"
+
+
+def test_frozen_bytes_tamper_fails_closed_with_intact_columns(service, verifier) -> None:
+    """Issue #20: a process-compromise tamper of the stored frozen bytes
+    must fail closed even when every binding column is intact — the digest
+    is re-derived from the bytes, not read back from the row."""
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    digest = service.token_digest(issued.token)
+
+    conn = sqlite3.connect(service.store._path)
+    try:
+        stored = conn.execute(
+            "SELECT invocation_bytes FROM proposals WHERE token_digest = ?", (digest,)
+        ).fetchone()[0]
+        tampered = stored.replace(b'"restart"', b'"destroy"')
+        assert tampered != stored
+        conn.execute(
+            "UPDATE proposals SET invocation_bytes = ? WHERE token_digest = ?",
+            (tampered, digest),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(ProposalError):
+        verifier.verify(issued.token, operator_identity=OPERATOR)
+    with pytest.raises(ProposalError):
+        service.resolve(issued.token)

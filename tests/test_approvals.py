@@ -30,9 +30,14 @@ OPERATOR = "alan"
 
 @pytest.fixture()
 def service(tmp_path, token_key, clock) -> ProposalService:
-    from helpers import make_service
+    import os
 
-    return make_service(tmp_path / "ops-guard.db", token_key=token_key, clock=clock)
+    from helpers import make_service
+    from ops_guard import AuditLog, AuditStore
+
+    path = tmp_path / "ops-guard.db"
+    audit = AuditLog(AuditStore(str(path)), fingerprint_key=os.urandom(32), clock=clock)
+    return make_service(path, token_key=token_key, clock=clock, audit=audit)
 
 
 @pytest.fixture()

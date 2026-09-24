@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from ops_guard.errors import (
     InvocationMismatchError,
@@ -30,7 +30,10 @@ from ops_guard.errors import (
     UnknownTokenError,
 )
 from ops_guard.invocation import Invocation, parse_frozen_invocation
-from ops_guard.store import AuditAppend, GuardedConnection, ProposalStore
+from ops_guard.store import AuditAppend, GuardedConnection, ProposalStore, same_database
+
+if TYPE_CHECKING:
+    from ops_guard.audit import AuditLog
 
 
 def default_clock() -> datetime:
@@ -78,12 +81,22 @@ class ProposalService:
         *,
         token_key: bytes,
         clock: Callable[[], datetime] = default_clock,
+        audit: "AuditLog",
     ) -> None:
+        """``audit`` is required (issue #40): proposal creation records its
+        event in the insert transaction, so it must share the store's one
+        authoritative database boundary."""
         if not token_key:
             raise ValueError("token_key must be a non-empty secret")
+        if not same_database(store.path, audit.store.path):
+            raise ValueError(
+                "the audit log and the proposal store must share one database: "
+                f"proposals={store.path!r}, audit={audit.store.path!r}"
+            )
         self._store = store
         self._token_key = token_key
         self._clock = clock
+        self._audit = audit
 
     @property
     def store(self) -> ProposalStore:
@@ -133,6 +146,19 @@ class ProposalService:
                     format_timestamp(now),
                     format_timestamp(expires_at),
                 ),
+            )
+            # Same transaction as the insert (issue #40): a proposal never
+            # exists without its audit event, and a failed append rolls the
+            # creation back — no proposal row, no token returned.
+            self._audit.append_on(
+                conn,
+                "proposal",
+                payload={
+                    "proposal_id": proposal_id,
+                    "invocation_digest": digest,
+                    "expires_at": format_timestamp(expires_at),
+                },
+                correlation_id=proposal_id,
             )
         return IssuedProposal(
             proposal_id=proposal_id,

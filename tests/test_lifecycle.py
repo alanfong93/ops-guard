@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import timedelta
 
 import pytest
@@ -9,7 +11,11 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from ops_guard import (
+    AuditLog,
+    AuditStore,
+    AuditWriteFailure,
     InvocationMismatchError,
+    ProposalStore,
     TokenAlreadyConsumedError,
     TokenExpiredError,
     UnknownTokenError,
@@ -18,6 +24,60 @@ from helpers import fresh_service, make_invocation
 
 ttl_strategy = st.timedeltas(min_value=timedelta(seconds=1), max_value=timedelta(days=365))
 approach = st.integers(min_value=1, max_value=10_000)
+
+
+class _FailingProposalAudit(AuditLog):
+    """Audit that persists everything except the proposal event."""
+
+    def append_on(self, conn, event_type, **kwargs):
+        if event_type == "proposal":
+            raise AuditWriteFailure("required audit append failed: injected")
+        return super().append_on(conn, event_type, **kwargs)
+
+
+def test_open_proposal_records_a_token_free_proposal_event(tmp_path, token_key, clock) -> None:
+    path = str(tmp_path / "ops-guard.db")
+    audit = AuditLog(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
+    service = _service_with_audit(path, token_key, clock, audit)
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    events = [e for e in audit.events() if e.event_type == "proposal"]
+    assert len(events) == 1
+    event = events[0]
+    # Recorded atomically with the insert: present by the time the token is
+    # returned, bound to the proposal it describes.
+    assert event.correlation_id == issued.proposal_id
+    assert set(event.payload) == {"proposal_id", "invocation_digest", "expires_at"}
+    assert event.payload["proposal_id"] == issued.proposal_id
+    assert event.payload["invocation_digest"] == issued.invocation_digest
+    assert issued.token not in json.dumps(event.payload)
+
+
+def test_failed_proposal_recording_rolls_back_creation(tmp_path, token_key, clock) -> None:
+    path = str(tmp_path / "ops-guard.db")
+    audit = _FailingProposalAudit(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
+    service = _service_with_audit(path, token_key, clock, audit)
+    with pytest.raises(AuditWriteFailure):
+        service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    # No proposal row and no token survived the failed recording.
+    with ProposalStore(path).read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+    assert [e for e in audit.events() if e.event_type == "proposal"] == []
+
+
+def test_proposal_service_rejects_split_audit_store(tmp_path, token_key, clock) -> None:
+    audit = AuditLog(
+        AuditStore(str(tmp_path / "elsewhere.db")), fingerprint_key=os.urandom(32), clock=clock
+    )
+    with pytest.raises(ValueError, match="share one database"):
+        _service_with_audit(str(tmp_path / "ops-guard.db"), token_key, clock, audit)
+
+
+def _service_with_audit(path, token_key, clock, audit):
+    from ops_guard import ProposalService
+
+    return ProposalService(
+        ProposalStore(path), token_key=token_key, clock=clock, audit=audit
+    )
 
 
 def test_issue_and_resolve_roundtrip(service) -> None:
@@ -149,12 +209,14 @@ def test_frozen_bytes_are_immutable_across_operations(service) -> None:
 def test_digest_is_keyed_across_services(tmp_path, clock) -> None:
     import os
 
-    from ops_guard import ProposalService, ProposalStore
+    from ops_guard import AuditLog, AuditStore, ProposalService, ProposalStore
 
-    path = tmp_path / "shared.db"
+    path = str(tmp_path / "shared.db")
     key_a, key_b = os.urandom(32), os.urandom(32)
-    service_a = ProposalService(ProposalStore(path), token_key=key_a, clock=clock)
-    service_b = ProposalService(ProposalStore(path), token_key=key_b, clock=clock)
+    audit_a = AuditLog(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
+    audit_b = AuditLog(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
+    service_a = ProposalService(ProposalStore(path), token_key=key_a, clock=clock, audit=audit_a)
+    service_b = ProposalService(ProposalStore(path), token_key=key_b, clock=clock, audit=audit_b)
     issued = service_a.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
     with pytest.raises(UnknownTokenError):
         service_b.resolve(issued.token)
@@ -166,13 +228,21 @@ def test_digest_is_keyed_across_services(tmp_path, clock) -> None:
 
 def test_naive_clock_is_rejected_with_typed_error(tmp_path) -> None:
     import os
-    from datetime import datetime
+    from datetime import datetime, timezone
 
-    from ops_guard import ProposalService, ProposalStore
+    from ops_guard import AuditLog, AuditStore, ProposalService, ProposalStore
 
     naive = datetime(2026, 9, 22, 12, 0, 0)  # no tzinfo
+    audit = AuditLog(
+        AuditStore(str(tmp_path / "proposals.db")),
+        fingerprint_key=os.urandom(32),
+        clock=lambda: datetime.now(timezone.utc),
+    )
     service = ProposalService(
-        ProposalStore(tmp_path / "proposals.db"), token_key=os.urandom(32), clock=lambda: naive
+        ProposalStore(tmp_path / "proposals.db"),
+        token_key=os.urandom(32),
+        clock=lambda: naive,
+        audit=audit,
     )
     with pytest.raises(ValueError):
         service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
@@ -180,9 +250,9 @@ def test_naive_clock_is_rejected_with_typed_error(tmp_path) -> None:
 
 def test_offsetless_tzinfo_clock_is_rejected(tmp_path) -> None:
     import os
-    from datetime import datetime, tzinfo
+    from datetime import datetime, timezone, tzinfo
 
-    from ops_guard import ProposalService, ProposalStore
+    from ops_guard import AuditLog, AuditStore, ProposalService, ProposalStore
 
     class BrokenZone(tzinfo):
         def utcoffset(self, _dt):
@@ -192,8 +262,16 @@ def test_offsetless_tzinfo_clock_is_rejected(tmp_path) -> None:
             return None
 
     broken = datetime(2026, 9, 22, 12, 0, 0, tzinfo=BrokenZone())
+    audit = AuditLog(
+        AuditStore(str(tmp_path / "proposals.db")),
+        fingerprint_key=os.urandom(32),
+        clock=lambda: datetime.now(timezone.utc),
+    )
     service = ProposalService(
-        ProposalStore(tmp_path / "proposals.db"), token_key=os.urandom(32), clock=lambda: broken
+        ProposalStore(tmp_path / "proposals.db"),
+        token_key=os.urandom(32),
+        clock=lambda: broken,
+        audit=audit,
     )
     with pytest.raises(ValueError):
         service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))

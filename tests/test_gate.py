@@ -76,11 +76,13 @@ class Harness:
     def __init__(self, tmp_path, token_key, clock):
         path = str(tmp_path / "ops-guard.db")
         self.clock = clock
-        self.service = ProposalService(ProposalStore(path), token_key=token_key, clock=clock)
+        self.audit = AuditLog(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
+        self.service = ProposalService(
+            ProposalStore(path), token_key=token_key, clock=clock, audit=self.audit
+        )
         self.verifier = ApprovalVerifier(
             ApprovalStore(path), self.service, operator_identity=OPERATOR, clock=clock
         )
-        self.audit = AuditLog(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
         self.gate = ExecutionGate(self.service, self.verifier, self.audit, clock=clock)
         self.executor_calls: list[Invocation] = []
 
@@ -112,9 +114,8 @@ def test_successful_standing_dispatch_consumes_and_records(harness: Harness) -> 
         harness.service.resolve(issued.token)
     events = harness.audit.events()
     types = [e.event_type for e in events]
-    assert types[0] == "execution_start"
-    assert "execution_outcome" in types
-    assert events[0].proposal_ref == issued.proposal_id
+    assert types == ["proposal", "execution_start", "execution_outcome"]
+    assert events[1].proposal_ref == issued.proposal_id
 
 
 def test_store_database_identity_is_pinned_at_construction(tmp_path, monkeypatch) -> None:
@@ -136,11 +137,16 @@ def test_gate_rejects_split_audit_store_before_any_dispatch(tmp_path, token_key,
     """One execution history must live in one database (issue #36)."""
     proposal_path = str(tmp_path / "ops-guard.db")
     audit_path = str(tmp_path / "audit-elsewhere.db")
-    service = ProposalService(ProposalStore(proposal_path), token_key=token_key, clock=clock)
+    # The proposal service is wired to the audit log sharing its database.
+    shared_audit = AuditLog(AuditStore(proposal_path), fingerprint_key=os.urandom(32), clock=clock)
+    service = ProposalService(
+        ProposalStore(proposal_path), token_key=token_key, clock=clock, audit=shared_audit
+    )
     verifier = ApprovalVerifier(
         ApprovalStore(proposal_path), service, operator_identity=OPERATOR, clock=clock
     )
-    audit = AuditLog(AuditStore(audit_path), fingerprint_key=os.urandom(32), clock=clock)
+    # The gate is handed a different audit log: a split configuration.
+    split_audit = AuditLog(AuditStore(audit_path), fingerprint_key=os.urandom(32), clock=clock)
     executor_calls: list[Invocation] = []
 
     def executor(invocation: Invocation) -> str:
@@ -148,7 +154,7 @@ def test_gate_rejects_split_audit_store_before_any_dispatch(tmp_path, token_key,
         return "success"
 
     with pytest.raises(GateConfigurationError):
-        ExecutionGate(service, verifier, audit, clock=clock)
+        ExecutionGate(service, verifier, split_audit, clock=clock)
 
     # The mismatched configuration never reached dispatch: the executor did
     # not run and no partial execution trail was written to either database.
@@ -157,16 +163,7 @@ def test_gate_rejects_split_audit_store_before_any_dispatch(tmp_path, token_key,
         assert conn.execute(
             "SELECT COUNT(*) FROM proposals WHERE state = 'consumed'"
         ).fetchone()[0] == 0
-        # No audit record landed in the proposal database: in a split
-        # configuration the audit_events table does not even exist there.
-        tables = {
-            row["name"]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
-        assert "audit_events" not in tables
-    split_audit = AuditLog(AuditStore(audit_path), fingerprint_key=os.urandom(32), clock=clock)
+    assert shared_audit.events() == []
     assert split_audit.events() == []
 
 
@@ -178,8 +175,8 @@ def test_gate_on_one_shared_database_dispatches_atomically(tmp_path, token_key, 
         harness.executor,
     )
     assert outcome.dispatched and outcome.authorization_path == "standing"
-    events = harness.audit.events()
-    assert [e.event_type for e in events][0] == "execution_start"
+    types = [e.event_type for e in harness.audit.events()]
+    assert types == ["proposal", "execution_start", "execution_outcome"]
     with pytest.raises(TokenAlreadyConsumedError):
         harness.service.resolve(issued.token)
 
@@ -490,6 +487,8 @@ def test_outcome_append_failure_escapes_after_dispatch(harness: Harness) -> None
     expected_invocation = make_invocation(runbook_revision_hash=_RB["content_hash"])
     assert harness.executor_calls == [expected_invocation]
     events = harness.audit.events()
-    assert [e.event_type for e in events] == ["execution_start"]
+    # The proposal event committed at issue time; execution_start is the
+    # durable record this test pins (outcome append failed after dispatch).
+    assert [e.event_type for e in events] == ["proposal", "execution_start"]
     with pytest.raises(TokenAlreadyConsumedError):
         harness.service.resolve(issued.token)

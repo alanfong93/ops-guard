@@ -59,7 +59,7 @@ def test_callback_cannot_commit_the_consume_transaction(db_path, token_key, cloc
     service = make_service(db_path, token_key=token_key, clock=clock)
     issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
 
-    def committing_callback(conn) -> None:
+    def committing_callback(conn, _consumed_digest: str) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS audit_probe (id INTEGER PRIMARY KEY, note TEXT)"
         )
@@ -97,7 +97,7 @@ def test_callback_cannot_send_transaction_control_sql(db_path, token_key, clock)
     ]
 
     for statement in attempts:
-        def hostile(conn, statement=statement):
+        def hostile(conn, _consumed_digest: str, statement=statement):
             conn.execute(statement)
             raise AssertionError("transaction-control SQL must be rejected first")
 
@@ -115,7 +115,7 @@ def test_comment_rollback_and_rebegin_chain_is_blocked(db_path, token_key, clock
     service = make_service(db_path, token_key=token_key, clock=clock)
     issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
 
-    def evasive_callback(conn) -> None:
+    def evasive_callback(conn, _consumed_digest: str) -> None:
         conn.execute("-- undo\nROLLBACK")
         conn.execute("-- reopen\nBEGIN")
         conn.execute("CREATE TABLE IF NOT EXISTS audit_probe (id INTEGER PRIMARY KEY, note TEXT)")
@@ -153,7 +153,7 @@ def test_obscured_keyword_forms_are_rejected(db_path, token_key, clock) -> None:
     ]
 
     for statement in obscured:
-        def hostile(conn, statement=statement):
+        def hostile(conn, _consumed_digest: str, statement=statement):
             conn.execute(statement)
 
         with pytest.raises(ValueError):
@@ -168,7 +168,7 @@ def test_guarded_cursor_hides_the_real_connection(db_path, token_key, clock) -> 
     issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
     observed = {}
 
-    def probing_callback(conn) -> None:
+    def probing_callback(conn, _consumed_digest: str) -> None:
         conn.execute("CREATE TABLE IF NOT EXISTS audit_probe (id INTEGER PRIMARY KEY, note TEXT)")
         cursor = conn.execute(
             "INSERT INTO audit_probe (note) VALUES ('execution-start')"
@@ -220,7 +220,7 @@ def test_consume_rolls_back_when_audit_append_fails(db_path, token_key, clock) -
     conn.close()
     issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
 
-    def failing_append(conn: sqlite3.Connection) -> None:
+    def failing_append(conn: sqlite3.Connection, _consumed_digest: str) -> None:
         conn.execute("INSERT INTO audit_probe (note) VALUES ('should-not-persist')")
         raise RuntimeError("audit write failed")
 
@@ -245,7 +245,7 @@ def test_consume_and_audit_append_commit_atomically(db_path, token_key, clock) -
     conn.commit()
     conn.close()
 
-    def audit_append(conn: sqlite3.Connection) -> None:
+    def audit_append(conn: sqlite3.Connection, _consumed_digest: str) -> None:
         conn.execute("INSERT INTO audit_probe (note) VALUES ('execution-start')")
 
     consumed = service.consume(issued.token, same_transaction=audit_append)

@@ -163,7 +163,11 @@ class GuardedConnection:
         return object.__getattribute__(self, "_conn").in_transaction
 
 
-AuditAppend = Callable[[GuardedConnection], None]
+AuditAppend = Callable[[GuardedConnection, str], None]
+"""A callback joining a consume transaction. It receives the guarded
+connection and the token digest actually being consumed in that
+transaction, so composited callbacks can bind their effects to exactly
+this consumption (issue #19; ADR 0003 rule 4)."""
 
 
 def database_path(path: str | Path) -> str:

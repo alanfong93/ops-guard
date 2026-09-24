@@ -267,7 +267,7 @@ class ExecutionGate:
         #    path with no recorded approval leaves nothing to flip, while a
         #    used approval still fails the transaction (replay).
         callbacks: list[AuditAppend] = [
-            lambda conn: self._audit.append_on(
+            lambda conn, _consumed_digest: self._audit.append_on(
                 conn,
                 "execution_start",
                 payload={
@@ -288,9 +288,9 @@ class ExecutionGate:
             self._approvals.spend_approval_append(request.token),
         ]
 
-        def composed(conn: sqlite3.Connection) -> None:
+        def composed(conn: sqlite3.Connection, consumed_digest: str) -> None:
             for callback in callbacks:
-                callback(conn)
+                callback(conn, consumed_digest)
 
         try:
             consumed = self._proposals.consume(

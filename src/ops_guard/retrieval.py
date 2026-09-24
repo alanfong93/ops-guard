@@ -15,6 +15,7 @@ authorization, or judgment lives here.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -68,7 +69,7 @@ def _snapshot_preconditions(preconditions: tuple[dict, ...]) -> tuple[dict, ...]
     """Detached copies per return: caller mutation of a result, an MCP
     dictionary, or the source document can never reach library state and
     the verified hash keeps describing what is served (issue #37)."""
-    return tuple(dict(item) for item in preconditions)
+    return tuple(copy.deepcopy(item) for item in preconditions)
 
 
 class RunbookLibrary:
@@ -146,7 +147,7 @@ def _result_to_dict(result: SearchResult) -> dict:
             "action": result.operation_action,
             "target": result.operation_target,
         },
-        "preconditions": [dict(item) for item in result.preconditions],
+        "preconditions": [copy.deepcopy(item) for item in result.preconditions],
         "verification": {
             "verifier": result.verifier,
             "verified_at": result.verified_at.isoformat(timespec="microseconds"),

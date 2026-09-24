@@ -17,15 +17,22 @@ from __future__ import annotations
 
 import copy
 import re
+import sqlite3
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from fastmcp import FastMCP
 from pydantic import Field
 
+from ops_guard.audit import AuditWriteFailure
 from ops_guard.errors import ProposalError
 from ops_guard.runbooks import Citation, Passage, RunbookRevision, parse_revision
+
+if TYPE_CHECKING:
+    from ops_guard.audit import AuditLog
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
@@ -156,8 +163,13 @@ def _result_to_dict(result: SearchResult) -> dict:
     }
 
 
-def build_mcp_server(library: RunbookLibrary) -> FastMCP:
-    """MCP server exposing ``search_runbook`` — no other surface."""
+def build_mcp_server(library: RunbookLibrary, audit: "AuditLog") -> FastMCP:
+    """MCP server exposing ``search_runbook`` — no other surface.
+
+    ``audit`` is required (issue #40): every valid search records correlated
+    ``request`` and ``guidance`` events atomically before results are
+    returned, fail-closed on recording failure.
+    """
     server: FastMCP = FastMCP("ops-guard-retrieval")
 
     @server.tool
@@ -168,6 +180,44 @@ def build_mcp_server(library: RunbookLibrary) -> FastMCP:
         """Cited runbook guidance: every result identifies one exact verified
         passage (runbook id, revision, content hash, locator, verification
         metadata) bound to the operation it evidences."""
-        return [_result_to_dict(result) for result in library.search(question, limit=limit)]
+        # Invalid input raises here, before any event is written.
+        results = library.search(question, limit=limit)
+        references = [
+            {
+                "runbook_id": result.runbook_id,
+                "revision": result.revision,
+                "content_hash": result.content_hash,
+                "locator": result.locator,
+                "operation": {
+                    "action": result.operation_action,
+                    "target": result.operation_target,
+                },
+            }
+            for result in results
+        ]
+        correlation_id = uuid.uuid4().hex
+        try:
+            with audit.store.transaction() as conn:
+                audit.append_on(
+                    conn,
+                    "request",
+                    payload={
+                        "question_fingerprint": audit.fingerprint(question),
+                        "limit": limit,
+                    },
+                    correlation_id=correlation_id,
+                )
+                audit.append_on(
+                    conn,
+                    "guidance",
+                    payload={"results": references},
+                    correlation_id=correlation_id,
+                )
+        except AuditWriteFailure:
+            raise
+        except sqlite3.Error as error:
+            raise AuditWriteFailure(f"required search audit failed: {error}") from error
+        # Only a fully recorded search returns results.
+        return [_result_to_dict(result) for result in results]
 
     return server

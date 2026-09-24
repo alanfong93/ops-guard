@@ -10,6 +10,9 @@ import os
 import pytest
 
 from ops_guard import (
+    AuditLog,
+    AuditStore,
+    AuditWriteFailure,
     Citation,
     TamperedRunbookError,
     UnverifiedRunbookError,
@@ -147,9 +150,8 @@ def test_limit_below_one_is_rejected() -> None:
         library.search("restart n8n", limit=0)
 
 
-def test_mcp_tool_returns_the_structured_evidence() -> None:
-    library, _ = library_with(VALID_RUNBOOK)
-    server = build_mcp_server(library)
+def test_mcp_tool_returns_the_structured_evidence(tmp_path, clock) -> None:
+    server, _audit = _wired_library(tmp_path, clock)
 
     async def call() -> list[dict]:
         from fastmcp import Client
@@ -178,9 +180,8 @@ def test_mcp_tool_returns_the_structured_evidence() -> None:
         assert cited.passage.text == evidence["passage_text"]
 
 
-def test_mcp_schema_pins_minimum_limit() -> None:
-    library, _ = library_with(VALID_RUNBOOK)
-    server = build_mcp_server(library)
+def test_mcp_schema_pins_minimum_limit(tmp_path, clock) -> None:
+    server, _audit = _wired_library(tmp_path, clock)
 
     async def call() -> None:
         from fastmcp import Client
@@ -190,3 +191,86 @@ def test_mcp_schema_pins_minimum_limit() -> None:
                 await client.call_tool("search_runbook", {"question": "restart", "limit": 0})
 
     asyncio.run(call())
+
+
+class _FailingSearchAudit(AuditLog):
+    """Audit that accepts construction but refuses every search event."""
+
+    def append_on(self, conn, event_type, **kwargs):
+        raise AuditWriteFailure("required audit append failed: injected")
+
+
+def _wired_library(tmp_path, clock):
+    path = str(tmp_path / "ops-guard.db")
+    audit = AuditLog(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
+    library, _ = library_with(VALID_RUNBOOK)
+    return build_mcp_server(library, audit), audit
+
+
+def _call(server: object, arguments: dict) -> list[dict]:
+    async def call():
+        from fastmcp import Client
+
+        async with Client(server) as client:
+            result = await client.call_tool("search_runbook", arguments)
+            # FastMCP emits no content for an empty result list.
+            return json.loads(result.content[0].text) if result.content else []
+
+    return asyncio.run(call())
+
+
+def test_valid_search_records_correlated_events_without_raw_question(tmp_path, clock) -> None:
+    server, audit = _wired_library(tmp_path, clock)
+    question = "restart n8n healthcheck secret-password"
+    results = _call(server, {"question": question})
+    assert results, "matching question must return evidence"
+    events = audit.events()
+    assert [e.event_type for e in events] == ["request", "guidance"]
+    request, guidance = events
+    assert request.correlation_id == guidance.correlation_id
+    # The raw question is never stored; only the keyed fingerprint is.
+    assert question not in json.dumps(request.payload)
+    fingerprint = request.payload["question_fingerprint"]
+    assert len(fingerprint) == 16 and all(c in "0123456789abcdef" for c in fingerprint)
+    assert request.payload["limit"] == 5
+    assert len(guidance.payload["results"]) == len(results)
+    for ref, evidence in zip(guidance.payload["results"], results):
+        assert ref["content_hash"] == evidence["content_hash"]
+        assert ref["locator"] == evidence["locator"]
+        # The references reconstruct the exact returned guidance from the
+        # verified revision — the passage body is not duplicated.
+        cited = resolve_citation(VALID_RUNBOOK, Citation(
+            runbook_id=ref["runbook_id"],
+            revision=ref["revision"],
+            content_hash=ref["content_hash"],
+            locator=ref["locator"],
+        ))
+        assert cited.passage.text == evidence["passage_text"]
+
+
+def test_zero_hit_search_still_records_correlated_events(tmp_path, clock) -> None:
+    server, audit = _wired_library(tmp_path, clock)
+    results = _call(server, {"question": "bake sourdough bread"})
+    assert results == []
+    events = audit.events()
+    assert [e.event_type for e in events] == ["request", "guidance"]
+    assert events[0].correlation_id == events[1].correlation_id
+    assert events[1].payload["results"] == []
+
+
+def test_invalid_search_records_no_events(tmp_path, clock) -> None:
+    server, audit = _wired_library(tmp_path, clock)
+    with pytest.raises(Exception):
+        _call(server, {"question": "   "})
+    assert audit.events() == []
+
+
+def test_failing_search_recording_returns_no_results(tmp_path, clock) -> None:
+    path = str(tmp_path / "ops-guard.db")
+    audit = _FailingSearchAudit(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
+    library, _ = library_with(VALID_RUNBOOK)
+    server = build_mcp_server(library, audit)
+    with pytest.raises(Exception):
+        _call(server, {"question": "restart n8n"})
+    # Fail-closed: nothing was returned and nothing was half-recorded.
+    assert audit.events() == []

@@ -7,7 +7,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from ops_guard import Invocation, ProposalService, ProposalStore
+from ops_guard import AuditLog, AuditStore, Invocation, ProposalService, ProposalStore
 
 UTC = timezone.utc
 
@@ -37,12 +37,21 @@ def make_invocation(**overrides: Any) -> Invocation:
     return Invocation(**fields)
 
 
-def make_service(path, *, token_key: bytes, clock: Callable[[], datetime]) -> ProposalService:
-    return ProposalService(ProposalStore(path), token_key=token_key, clock=clock)
+def make_service(path, *, token_key: bytes, clock: Callable[[], datetime], audit: AuditLog | None = None) -> ProposalService:
+    """Service with its paired audit log; one is auto-wired on the same
+    database when not supplied (the service itself requires the pairing)."""
+    if audit is None:
+        audit = AuditLog(AuditStore(str(path)), fingerprint_key=os.urandom(32), clock=clock)
+    return ProposalService(ProposalStore(path), token_key=token_key, clock=clock, audit=audit)
 
 
 def fresh_service() -> tuple[ProposalService, FakeClock]:
-    """A new service on a fresh database; for use inside @given examples."""
+    """A new service (with its paired audit log) on a fresh database;
+    for use inside @given examples."""
     path = os.path.join(tempfile.mkdtemp(prefix="ops-guard-test-"), "proposals.db")
     clock = FakeClock()
-    return ProposalService(ProposalStore(path), token_key=os.urandom(32), clock=clock), clock
+    audit = AuditLog(AuditStore(path), fingerprint_key=os.urandom(32), clock=clock)
+    service = ProposalService(
+        ProposalStore(path), token_key=os.urandom(32), clock=clock, audit=audit
+    )
+    return service, clock

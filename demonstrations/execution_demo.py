@@ -74,9 +74,9 @@ def run_demonstration() -> dict:
 
     path = os.path.join(tempfile.mkdtemp(prefix="ops-guard-demo-"), "ops-guard.db")
     clock = FakeClock()
-    service = ProposalService(ProposalStore(path), token_key=_os.urandom(32), clock=clock)
-    verifier = ApprovalVerifier(ApprovalStore(path), service, operator_identity=OPERATOR, clock=clock)
     audit = AuditLog(AuditStore(path), fingerprint_key=_os.urandom(32), clock=clock)
+    service = ProposalService(ProposalStore(path), token_key=_os.urandom(32), clock=clock, audit=audit)
+    verifier = ApprovalVerifier(ApprovalStore(path), service, operator_identity=OPERATOR, clock=clock)
     gate = ExecutionGate(service, verifier, audit, clock=clock)
 
     standing = parse_authorization({
@@ -178,9 +178,9 @@ def run_demonstration() -> dict:
     clock.advance(11 * 60)
     scenario("expired-token-refusal", request(issued.token))
     clock = FakeClock()  # restore the clock for later scenarios
-    service = ProposalService(ProposalStore(path), token_key=_os.urandom(32), clock=clock)
-    verifier = ApprovalVerifier(ApprovalStore(path), service, operator_identity=OPERATOR, clock=clock)
     audit = AuditLog(AuditStore(path), fingerprint_key=_os.urandom(32), clock=clock)
+    service = ProposalService(ProposalStore(path), token_key=_os.urandom(32), clock=clock, audit=audit)
+    verifier = ApprovalVerifier(ApprovalStore(path), service, operator_identity=OPERATOR, clock=clock)
     gate = ExecutionGate(service, verifier, audit, clock=clock)
 
     # 8. Audit-write refusal (execution-start append fails; nothing runs).

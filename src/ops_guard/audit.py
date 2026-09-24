@@ -300,6 +300,17 @@ class AuditLog:
         proposal and audit records share one database boundary (issue #36)."""
         return self._store
 
+    def fingerprint(self, value) -> str:
+        """Keyed fingerprint (16 hex characters) over the canonicalized value,
+        for data that must stay auditable without being stored raw — e.g. the
+        free-text search question, which may contain credentials or personal
+        data. Uses the same persistent key as redaction fingerprints, so
+        equal values correlate across events without revealing content."""
+        digest_input = canonicalize_json(_jsonable(value))
+        return hmac.new(
+            self._fingerprint_key, digest_input, hashlib.sha256
+        ).hexdigest()[:16]
+
     def _validate(self, event_type, payload, evidence_refs, outcome):
         """Cheap caller validation; runs outside the write-failure wrapper."""
         if not isinstance(event_type, str) or not event_type:

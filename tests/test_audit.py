@@ -31,8 +31,10 @@ UTC = timezone.utc
 def audit(tmp_path, token_key, clock):
     path = str(tmp_path / "ops-guard.db")
     store = AuditStore(path)
-    service = ProposalService(ProposalStore(path), token_key=token_key, clock=clock)
     log = AuditLog(store, fingerprint_key=os.urandom(32), clock=clock)
+    service = ProposalService(
+        ProposalStore(path), token_key=token_key, clock=clock, audit=log
+    )
     return log, service
 
 
@@ -156,8 +158,9 @@ def test_destructive_and_replacing_statements_are_blocked_at_the_seam(audit) -> 
         with pytest.raises(ValueError):
             service.consume(issued.token, same_transaction=hostile)
 
-    # The audit history is intact and the token is still eligible.
-    assert [e.sequence for e in log.events()] == [1]
+    # The audit history is intact (the committed proposal event plus the
+    # request) and the token is still eligible.
+    assert [e.sequence for e in log.events()] == [1, 2]
     assert not service.resolve(issued.token).consumed
 
 
@@ -223,7 +226,7 @@ def test_execution_start_then_outcome_with_unknown_result(audit) -> None:
         outcome="unknown",
         failure_code=None,
     )
-    start, outcome = log.events()
+    start, outcome = [e for e in log.events() if e.event_type in ("execution_start", "execution_outcome")]
     assert start.event_type == "execution_start" and outcome.event_type == "execution_outcome"
     assert start.sequence < outcome.sequence
     assert outcome.outcome == "unknown"
@@ -242,7 +245,9 @@ def test_required_audit_failure_rolls_back_token_consumption(audit) -> None:
         service.consume(issued.token, same_transaction=failing_append)
 
     assert not service.resolve(issued.token).consumed  # fail-closed: nothing ran
-    assert log.events() == []  # nothing half-recorded
+    # Nothing half-recorded by the failed consume (the committed proposal
+    # event from open_proposal is expected; no execution event exists).
+    assert [e for e in log.events() if e.event_type != "proposal"] == []
 
 
 def test_gate_pairing_commits_start_with_the_consume(audit) -> None:
@@ -261,9 +266,8 @@ def test_gate_pairing_commits_start_with_the_consume(audit) -> None:
 
     consumed = service.consume(issued.token, same_transaction=append_start)
     assert consumed.consumed
-    events = log.events()
-    assert len(events) == 1 and events[0].event_type == "execution_start"
-    assert events[0].proposal_ref == issued.proposal_id
+    events = [e for e in log.events() if e.event_type == "execution_start"]
+    assert len(events) == 1 and events[0].proposal_ref == issued.proposal_id
 
 
 def test_crashed_append_leaves_no_gap(audit) -> None:

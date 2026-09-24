@@ -16,6 +16,7 @@ authorization, or judgment lives here.
 from __future__ import annotations
 
 import copy
+import hmac
 import re
 import sqlite3
 import uuid
@@ -29,7 +30,15 @@ from pydantic import Field
 
 from ops_guard.audit import AuditWriteFailure
 from ops_guard.errors import ProposalError
-from ops_guard.runbooks import Citation, Passage, RunbookRevision, parse_revision
+from ops_guard.runbooks import (
+    Citation,
+    CitedPassage,
+    MalformedRunbookError,
+    Passage,
+    RunbookRevision,
+    UnknownPassageError,
+    parse_revision,
+)
 
 if TYPE_CHECKING:
     from ops_guard.audit import AuditLog
@@ -107,6 +116,44 @@ class RunbookLibrary:
                     )
                 )
         return cls(revisions), rejections
+
+    def resolve_citation(self, citation: Citation) -> CitedPassage:
+        """Resolve a citation against the verified revisions only (issue #34).
+
+        The caller never supplies a revision document: the citation's content
+        hash must name a revision this library verified at load time, or the
+        resolution refuses. Checks mirror ``resolve_citation`` — hash, then
+        runbook id and revision label, then the locator. Served preconditions
+        are detached copies: library state cannot be mutated through the
+        evidence (issue #37 convention).
+        """
+        if not isinstance(citation, Citation) or not all(
+            isinstance(getattr(citation, field), str) and getattr(citation, field)
+            for field in ("runbook_id", "revision", "content_hash", "locator")
+        ):
+            raise MalformedRunbookError("citation fields must be non-empty strings")
+        for revision in self._revisions:
+            if hmac.compare_digest(revision.content_hash, citation.content_hash):
+                break
+        else:
+            raise UnknownPassageError(
+                "no verified revision carries this content hash"
+            )
+        if citation.runbook_id != revision.runbook_id or citation.revision != revision.revision:
+            raise MalformedRunbookError("citation names a different revision")
+        for passage in revision.passages:
+            if passage.locator == citation.locator:
+                return CitedPassage(
+                    citation=citation,
+                    passage=passage,
+                    operation_action=revision.operation_action,
+                    operation_target=revision.operation_target,
+                    preconditions=tuple(
+                        copy.deepcopy(item) for item in revision.preconditions
+                    ),
+                    verifier=revision.verification.verifier,
+                )
+        raise UnknownPassageError(f"locator {citation.locator!r} does not exist in the revision")
 
     def search(self, question: str, *, limit: int = 5) -> list[SearchResult]:
         """Rank passages against the question; every hit is verified evidence."""

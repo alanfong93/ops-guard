@@ -51,9 +51,7 @@ from ops_guard.retrieval import RunbookLibrary
 from ops_guard.runbooks import (
     Citation,
     MalformedRunbookError,
-    TamperedRunbookError,
     UnknownPassageError,
-    UnverifiedRunbookError,
 )
 from ops_guard.store import AuditAppend, same_database
 
@@ -166,22 +164,26 @@ class ExecutionGate:
         #    like a clean refusal).
         try:
             evidence = self._runbooks.resolve_citation(request.citation)
-        except (MalformedRunbookError, UnverifiedRunbookError, TamperedRunbookError, UnknownPassageError) as error:
+        except (MalformedRunbookError, UnknownPassageError) as error:
             return refuse(f"evidence rejected: {error}")
 
         # 2. Script resolution: the exact bytes come from the authoritative
         #    configured source and their SHA-256 is the only script digest
         #    this gate reasons about (issue #34; ADR 0004) — the caller
-        #    names the path, never the hash. Resolution failure is a
-        #    refusal, before any consumption or side effect.
+        #    names the path, never the hash. The source is the operator's
+        #    trust boundary: whatever it returns for a path IS the artifact
+        #    that path names. Resolution failure — including a non-bytes
+        #    return — is a refusal, before any consumption or side effect.
         try:
             script_bytes = self._script_source(request.script_path)
-        except (OSError, LookupError, ValueError) as error:
+            if not isinstance(script_bytes, bytes):
+                raise TypeError("script_source must resolve a path to bytes")
+            resolved_script = ScriptIdentity(
+                path=request.script_path,
+                sha256=hashlib.sha256(script_bytes).hexdigest(),
+            )
+        except (OSError, LookupError, ValueError, TypeError) as error:
             return refuse(f"script could not be resolved: {error}")
-        resolved_script = ScriptIdentity(
-            path=request.script_path,
-            sha256=hashlib.sha256(script_bytes).hexdigest(),
-        )
 
         # 3. Token validity and frozen-invocation revalidation.
         try:

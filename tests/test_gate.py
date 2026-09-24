@@ -724,3 +724,21 @@ def _consumed(service: ProposalService, issued: object) -> bool:
         return service.resolve(issued.token).consumed  # type: ignore[attr-defined]
     except TokenAlreadyConsumedError:
         return True
+
+
+def test_script_source_returning_non_bytes_refuses_fail_closed(
+    harness: Harness,
+) -> None:
+    """A broken or misconfigured source must produce a refusal — audited,
+    unconsumed — never a raw TypeError escaping the gate (review cycle 1)."""
+    issued = harness.issue()
+    harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    harness.scripts[SCRIPT_PATH] = None  # type: ignore[assignment]
+    outcome = harness.gate.execute(make_request(token=issued.token, standing=None), harness.executor)
+    assert not outcome.dispatched
+    assert "script could not be resolved" in outcome.refusal
+    assert harness.executor_calls == []
+    frozen = harness.service.resolve(issued.token)
+    assert not frozen.consumed
+    refusals = [e for e in harness.audit.events() if e.event_type == "refusal"]
+    assert refusals and "script_source must resolve a path to bytes" in refusals[-1].payload["reason"]

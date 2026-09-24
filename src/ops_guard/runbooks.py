@@ -8,6 +8,7 @@ shape, carries verification metadata, its content hash recomputes exactly
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import re
@@ -179,7 +180,14 @@ def parse_revision(document: Mapping) -> RunbookRevision:
     content_hash = _require_str(document, "content_hash")
     if not _HEX64.fullmatch(content_hash):
         raise MalformedRunbookError("content_hash must be 64 hexadecimal characters")
-    literal_body = {key: value for key, value in document.items() if key != "content_hash"}
+    # Snapshot every nested value: the caller keeps its own mutable document,
+    # and the verified hash must keep describing the parsed revision after
+    # that document is edited (issue #37).
+    literal_body = {
+        key: copy.deepcopy(value)
+        for key, value in document.items()
+        if key != "content_hash"
+    }
     revision = RunbookRevision(
         runbook_id=_require_str(document, "runbook_id"),
         revision=_require_str(document, "revision"),

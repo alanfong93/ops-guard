@@ -67,6 +67,22 @@ def test_malformed_shape_is_rejected() -> None:
         parse_revision(load("invalid-malformed.json"))
 
 
+def test_caller_mutation_after_parse_cannot_change_the_parsed_revision() -> None:
+    document = load("valid-n8n-restart.json")
+    revision = parse_revision(document)
+    expected_hash = revision.expected_content_hash()
+    document["preconditions"][0]["expected"] = "mutated"
+    document["operation"]["action"] = "mutated"
+    document["verification"]["verifier"] = "mutated"
+    document["passages"][0]["text"] = "mutated"
+    assert revision.preconditions == ({"name": "healthcheck", "expected": "passing"},)
+    assert revision.operation_action == "restart"
+    assert revision.verification.verifier == "alan"
+    assert revision.passages[0].text.startswith("cd ~/stack")
+    assert revision.expected_content_hash() == expected_hash
+    assert revision.expected_content_hash() == revision.content_hash
+
+
 def test_absent_locator_is_an_unknown_passage() -> None:
     document = load("valid-n8n-restart.json")
     with pytest.raises(UnknownPassageError):

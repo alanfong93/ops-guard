@@ -64,6 +64,13 @@ def _terms(text: str) -> list[str]:
     return _TOKEN.findall(text.lower())
 
 
+def _snapshot_preconditions(preconditions: tuple[dict, ...]) -> tuple[dict, ...]:
+    """Detached copies per return: caller mutation of a result, an MCP
+    dictionary, or the source document can never reach library state and
+    the verified hash keeps describing what is served (issue #37)."""
+    return tuple(dict(item) for item in preconditions)
+
+
 class RunbookLibrary:
     """Immutable set of verified revisions; the only source of evidence."""
 
@@ -117,7 +124,7 @@ class RunbookLibrary:
                     passage_text=passage.text,
                     operation_action=revision.operation_action,
                     operation_target=revision.operation_target,
-                    preconditions=revision.preconditions,
+                    preconditions=_snapshot_preconditions(revision.preconditions),
                     verifier=revision.verification.verifier,
                     verified_at=revision.verification.verified_at,
                     applicability=revision.verification.applicability,
@@ -139,7 +146,7 @@ def _result_to_dict(result: SearchResult) -> dict:
             "action": result.operation_action,
             "target": result.operation_target,
         },
-        "preconditions": list(result.preconditions),
+        "preconditions": [dict(item) for item in result.preconditions],
         "verification": {
             "verifier": result.verifier,
             "verified_at": result.verified_at.isoformat(timespec="microseconds"),

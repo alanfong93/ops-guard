@@ -42,3 +42,8 @@ class ApprovalReplayedError(ApprovalError):
 
 class ApprovalAlreadyRecordedError(ApprovalError):
     """A proposal carries at most one approval; a correction is a new proposal."""
+
+
+class GateConfigurationError(ValueError):
+    """The gate was configured with stores that cannot form one durable
+    transaction boundary; rejected at initialization, before any dispatch."""

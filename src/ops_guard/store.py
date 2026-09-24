@@ -7,6 +7,7 @@ consumption can commit atomically with the pre-execution audit append.
 
 from __future__ import annotations
 
+import os.path
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -165,11 +166,40 @@ class GuardedConnection:
 AuditAppend = Callable[[GuardedConnection], None]
 
 
+def database_path(path: str | Path) -> str:
+    """Absolute, case-normalized database path, fixed at store-construction
+    time so later working-directory changes cannot alter which file a store
+    opens (issue #36). ``:memory:`` passes through unchanged: it names no
+    file, and each connection to it is a separate empty database."""
+    text = str(path)
+    if text.strip().lower() == ":memory:":
+        return text
+    return os.path.normcase(os.path.abspath(text))
+
+
+def same_database(left: str, right: str) -> bool:
+    """True when two store paths denote one SQLite database file.
+
+    Stores pin their path at construction (``database_path``), so the
+    comparison cannot be made stale by a working-directory change.
+    ``:memory:`` is never the same database as anything — fail-closed
+    for memory-backed stores.
+    """
+    if str(left).strip().lower() == ":memory:" or str(right).strip().lower() == ":memory:":
+        return False
+    return database_path(left) == database_path(right)
+
+
 class ProposalStore:
     """File-backed store; one short-lived connection per operation."""
 
     def __init__(self, path: str | Path) -> None:
-        self._path = str(path)
+        self._path = database_path(path)
+
+    @property
+    def path(self) -> str:
+        """The database file this store persists to (store-pairing validation)."""
+        return self._path
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=30.0, isolation_level=None)

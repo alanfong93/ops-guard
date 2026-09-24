@@ -17,6 +17,7 @@ from ops_guard import (
     Citation,
     ExecutionGate,
     ExecutionRequest,
+    GateConfigurationError,
     Invocation,
     ProposalService,
     ProposalStore,
@@ -114,6 +115,73 @@ def test_successful_standing_dispatch_consumes_and_records(harness: Harness) -> 
     assert types[0] == "execution_start"
     assert "execution_outcome" in types
     assert events[0].proposal_ref == issued.proposal_id
+
+
+def test_store_database_identity_is_pinned_at_construction(tmp_path, monkeypatch) -> None:
+    """A cwd change after store construction must not merge two databases
+    into one validated boundary (issue #36, adversarial finding)."""
+    from ops_guard.store import same_database
+
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    proposal_store = ProposalStore("ops-guard.db")
+    monkeypatch.chdir(second)
+    audit_store = AuditStore("ops-guard.db")
+    assert not same_database(proposal_store.path, audit_store.path)
+
+
+def test_gate_rejects_split_audit_store_before_any_dispatch(tmp_path, token_key, clock) -> None:
+    """One execution history must live in one database (issue #36)."""
+    proposal_path = str(tmp_path / "ops-guard.db")
+    audit_path = str(tmp_path / "audit-elsewhere.db")
+    service = ProposalService(ProposalStore(proposal_path), token_key=token_key, clock=clock)
+    verifier = ApprovalVerifier(
+        ApprovalStore(proposal_path), service, operator_identity=OPERATOR, clock=clock
+    )
+    audit = AuditLog(AuditStore(audit_path), fingerprint_key=os.urandom(32), clock=clock)
+    executor_calls: list[Invocation] = []
+
+    def executor(invocation: Invocation) -> str:
+        executor_calls.append(invocation)
+        return "success"
+
+    with pytest.raises(GateConfigurationError):
+        ExecutionGate(service, verifier, audit, clock=clock)
+
+    # The mismatched configuration never reached dispatch: the executor did
+    # not run and no partial execution trail was written to either database.
+    assert executor_calls == []
+    with ProposalStore(proposal_path).read() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM proposals WHERE state = 'consumed'"
+        ).fetchone()[0] == 0
+        # No audit record landed in the proposal database: in a split
+        # configuration the audit_events table does not even exist there.
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert "audit_events" not in tables
+    split_audit = AuditLog(AuditStore(audit_path), fingerprint_key=os.urandom(32), clock=clock)
+    assert split_audit.events() == []
+
+
+def test_gate_on_one_shared_database_dispatches_atomically(tmp_path, token_key, clock) -> None:
+    harness = Harness(tmp_path, token_key, clock)
+    issued = harness.issue()
+    outcome = harness.gate.execute(
+        make_request(token=issued.token, expected_digest=issued.invocation_digest),
+        harness.executor,
+    )
+    assert outcome.dispatched and outcome.authorization_path == "standing"
+    events = harness.audit.events()
+    assert [e.event_type for e in events][0] == "execution_start"
+    with pytest.raises(TokenAlreadyConsumedError):
+        harness.service.resolve(issued.token)
 
 
 def test_successful_approval_dispatch_spends_the_approval(harness: Harness) -> None:

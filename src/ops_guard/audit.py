@@ -54,6 +54,7 @@ from datetime import datetime
 
 from ops_guard.invocation import canonicalize_json
 from ops_guard.proposals import format_timestamp, parse_timestamp
+from ops_guard.store import database_path
 
 AUDIT_SCHEMA_VERSION = 1
 
@@ -183,12 +184,17 @@ class AuditStore:
     """Same-file persistence for audit events (shares the proposal DB)."""
 
     def __init__(self, path: str) -> None:
-        self._path = str(path)
+        self._path = database_path(path)
         conn = self._local_conn()
         try:
             conn.executescript(_AUDIT_SCHEMA)
         finally:
             conn.close()
+
+    @property
+    def path(self) -> str:
+        """The database file this store persists to (store-pairing validation)."""
+        return self._path
 
     def _local_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=30.0, isolation_level=None)
@@ -287,6 +293,12 @@ class AuditLog:
         self._fingerprint_key = fingerprint_key
         self._sensitive_keys = sensitive_keys
         self._clock = clock
+
+    @property
+    def store(self) -> AuditStore:
+        """The persistence store, so gate configuration can validate that
+        proposal and audit records share one database boundary (issue #36)."""
+        return self._store
 
     def _validate(self, event_type, payload, evidence_refs, outcome):
         """Cheap caller validation; runs outside the write-failure wrapper."""

@@ -190,30 +190,41 @@ class ApprovalVerifier:
     def record_approval(self, token: str, *, operator_identity: str) -> ApprovalRecord:
         """Internal operator path: record configured-operator approval for a proposal.
 
-        The caller must present the configured operator identity; the proposal
-        must be live (unknown, consumed, and expired tokens are rejected by the
-        proposal lifecycle). Re-recordings are rejected — a correction is a new
-        proposal with its own approval.
+        The caller must present the configured operator identity. Eligibility
+        is revalidated inside the insert transaction (issue #35): a proposal
+        that is unknown, mismatched, consumed, or expired at commit time is
+        rejected with the proposal lifecycle's typed errors and no row is
+        written — a concurrent consume can therefore never leave a recorded
+        approval on a consumed proposal (ADR 0003 rule 4). Re-recordings are
+        rejected — a correction is a new proposal with its own approval.
         """
         if not self._identity_matches(operator_identity):
             raise ApprovalOperatorMismatchError(
                 "only the configured operator may record approval"
             )
-        frozen = self._proposals.resolve(token)
         token_digest = self._proposals.token_digest(token)
-        now = self._now()
-        record = ApprovalRecord(
-            approval_id=uuid.uuid4().hex,
-            token_digest=token_digest,
-            proposal_id=frozen.proposal_id,
-            operator_identity=self._operator_identity,
-            invocation_digest=frozen.invocation_digest,
-            runbook_revision_hash=frozen.invocation.runbook_revision_hash,
-            expires_at=frozen.expires_at,
-            created_at=now,
-            used=False,
-        )
         with self._proposals.store.transaction() as conn:
+            # The eligibility read sits inside the BEGIN IMMEDIATE write lock
+            # (issue #35), serialized against every consume: either this
+            # transaction commits first — the approval exists before the
+            # token is consumed and is spent atomically with it — or the
+            # consume committed first and the revalidation below refuses.
+            # The pre-transaction check this replaces could pass while a
+            # concurrent consume committed, recording an approval for a
+            # dead proposal.
+            now = self._now()
+            frozen = self._proposals.resolve_on(conn, token)
+            record = ApprovalRecord(
+                approval_id=uuid.uuid4().hex,
+                token_digest=token_digest,
+                proposal_id=frozen.proposal_id,
+                operator_identity=self._operator_identity,
+                invocation_digest=frozen.invocation_digest,
+                runbook_revision_hash=frozen.invocation.runbook_revision_hash,
+                expires_at=frozen.expires_at,
+                created_at=now,
+                used=False,
+            )
             try:
                 ApprovalStore.insert_on(
                     conn,

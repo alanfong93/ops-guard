@@ -350,3 +350,96 @@ def test_verify_eligibility_boundary_is_the_proposal_expiry(approach: int) -> No
     clock.advance(600)  # at or past the ten-minute boundary
     with pytest.raises(TokenExpiredError):
         verifier.verify(issued.token, operator_identity=OPERATOR)
+
+
+_operation = st.sampled_from(["record", "consume_gate", "race"])
+
+
+def _approval_row(service: ProposalService, digest: str) -> tuple[str, str | None] | None:
+    with service.store.read() as conn:
+        row = ApprovalStore.fetch_on(conn, digest)
+    return None if row is None else (row["state"], row["used_at"])
+
+
+def _proposal_state(service: ProposalService, digest: str) -> str:
+    with service.store.read() as conn:
+        row = conn.execute(
+            "SELECT state FROM proposals WHERE token_digest = ?", (digest,)
+        ).fetchone()
+    assert row is not None
+    return row["state"]
+
+
+@given(steps=st.lists(_operation, max_size=7))
+@settings(max_examples=25, deadline=None)
+def test_no_operation_ordering_leaves_a_recorded_approval_on_a_consumed_proposal(
+    steps: list[str],
+) -> None:
+    """State-transition invariant (issue #35): across arbitrary orderings of
+    approval recording, gate-style consumption, and record-vs-consume races,
+    a consumed proposal never carries a recorded (unspent) approval, and a
+    rejected recording creates no row and alters no existing row."""
+    service, clock = fresh_service()
+    verifier = ApprovalVerifier(
+        ApprovalStore(service.store.path),
+        service,
+        operator_identity=OPERATOR,
+        clock=clock,
+    )
+    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=30))
+    digest = service.token_digest(issued.token)
+
+    def attempt_record(outcomes: list[object]) -> None:
+        try:
+            verifier.record_approval(issued.token, operator_identity=OPERATOR)
+            outcomes.append("recorded")
+        except Exception as error:  # noqa: BLE001 - the rejection type is the assertion
+            outcomes.append(error)
+
+    for step in steps:
+        before = _approval_row(service, digest)
+        if step == "record":
+            outcomes: list[object] = []
+            attempt_record(outcomes)
+            after = _approval_row(service, digest)
+            if outcomes[0] == "recorded":
+                assert before is None
+                assert after == ("recorded", None)
+            else:
+                assert isinstance(
+                    outcomes[0],
+                    (
+                        TokenAlreadyConsumedError,
+                        TokenExpiredError,
+                        UnknownTokenError,
+                        ApprovalAlreadyRecordedError,
+                    ),
+                )
+                assert after == before, "a rejected recording altered stored state"
+        elif step == "consume_gate":
+            try:
+                service.consume(
+                    issued.token,
+                    same_transaction=verifier.spend_approval_append(issued.token),
+                )
+            except TokenAlreadyConsumedError:
+                pass  # already terminal from an earlier step in this example
+        else:  # race: a recording concurrent with a gate-style consume
+            outcomes = []
+            thread = threading.Thread(target=attempt_record, args=(outcomes,))
+            thread.start()
+            try:
+                service.consume(
+                    issued.token,
+                    same_transaction=verifier.spend_approval_append(issued.token),
+                )
+            except TokenAlreadyConsumedError:
+                pass  # the recording won the lock earlier in this example
+            thread.join(timeout=30.0)
+            assert not thread.is_alive(), "record/consume race deadlocked"
+
+        if _proposal_state(service, digest) == "consumed":
+            row = _approval_row(service, digest)
+            assert row is None or row[0] == "used", (
+                "a consumed proposal carries an unspent recorded approval"
+            )

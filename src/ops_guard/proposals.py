@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 
 from ops_guard.errors import (
+    FrozenInvocationTamperedError,
     InvocationMismatchError,
     ProposalError,
     TokenAlreadyConsumedError,
@@ -267,9 +268,25 @@ class ProposalService:
 
 
 def _row_to_proposal(row: sqlite3.Row) -> FrozenProposal:
+    """Load a frozen proposal, re-deriving its digest from the stored bytes.
+
+    Defense-in-depth (issue #20; ADR 0002 rule 1): the digest column alone
+    cannot vouch for `invocation_bytes` that a process-compromise tamper
+    rewrote. The stored bytes are re-parsed and re-canonicalized, and the
+    SHA-256 of the result must reproduce the stored digest — or the freeze
+    contract is rejected, before any caller trusts the content.
+    """
+    invocation = parse_frozen_invocation(row["invocation_bytes"])
+    if not hmac.compare_digest(
+        hashlib.sha256(invocation.canonical_bytes()).hexdigest(),
+        row["invocation_digest"],
+    ):
+        raise FrozenInvocationTamperedError(
+            "frozen invocation bytes do not match the stored invocation digest"
+        )
     return FrozenProposal(
         proposal_id=row["proposal_id"],
-        invocation=parse_frozen_invocation(row["invocation_bytes"]),
+        invocation=invocation,
         invocation_digest=row["invocation_digest"],
         token_digest=row["token_digest"],
         created_at=parse_timestamp(row["created_at"]),

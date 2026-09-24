@@ -24,6 +24,12 @@ class TokenExpiredError(ProposalError):
     """The current time is at or past the proposal's absolute expiry."""
 
 
+class FrozenInvocationTamperedError(ProposalError):
+    """The stored frozen invocation bytes do not re-derive the stored
+    invocation digest (issue #20; ADR 0002 rule 1): the bytes were altered
+    after the freeze, so nothing they describe was ever approved."""
+
+
 class ApprovalError(Exception):
     """Base class for approval-verifier rejections (ADR 0003)."""
 

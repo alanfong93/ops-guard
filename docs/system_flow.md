@@ -4,10 +4,11 @@
 flowchart TD
     HOST["MCP-speaking host"] -->|"search_runbook(question)"| RETRIEVE["Retrieve cited guidance"]
     RUNBOOKS[("Human-verified runbooks")] --> RETRIEVE
-    RETRIEVE -->|"answer + supporting passage"| HOST
-    RETRIEVE -.-> AUDIT_LOG[("Durable audit record")]
+    RETRIEVE -.->|"request + guidance events, correlated, question fingerprinted not stored"| AUDIT_LOG
+    RETRIEVE -->|"recorded guidance: answer + supporting passage"| HOST
 
     HOST -->|"propose_fix(problem)"| PROPOSE["Freeze proposal and issue one-time token"]
+    PROPOSE -.->|"proposal event in the insert transaction, token never stored"| AUDIT_LOG
     PROPOSE --> EVIDENCE{"Required procedural evidence?"}
     EVIDENCE -->|"No"| REFUSE["Refuse execution and record reason"]
     EVIDENCE -->|"Yes"| PRECONDITIONS{"Preconditions met?"}
@@ -22,7 +23,6 @@ flowchart TD
     AUDIT -->|"No"| REFUSE
     AUDIT -->|"Yes"| EXECUTE["Execute submitted operation"]
     EXECUTE --> OUTCOME["Record observed or unknown outcome"]
-    PROPOSE -.-> AUDIT_LOG
     REFUSE --> AUDIT_LOG
     OUTCOME --> AUDIT_LOG
 
@@ -31,4 +31,4 @@ flowchart TD
     style AUDIT_LOG fill:#e0e7ff,stroke:#3730a3,color:#000
 ```
 
-The judge may attach an advisory risk assessment to a proposal, but it does not alter any gate in this flow and cannot authorize execution. Proposal-bound approval is recorded and verified by the internal approval verifier (docs/adr/0003-approval-verifier-boundary.md): the proposing host cannot supply it, and the approval is spent exactly when its token is consumed. Standing authorization (docs/adr/0004-exact-standing-authorization.md) matches the frozen invocation against the complete permitted invocation — verified script identity, action, target, arguments, preconditions, runbook revision hash — as exact equality; missing or unequal fields never match, and there are no wildcards. Audit events are insert-only and redacted at write time; the pre-execution append commits in the same durable transaction as the token consumption, so a required audit failure refuses the execution. Runbook revisions are immutable and human-verified (docs/runbook-format.md); cited guidance qualifies as required procedural evidence only when bound to an unchanged revision. This entire flow is enforced by the execution gate (`src/ops_guard/gate.py`), which records a refusal for every failed check before any side effect.
+The judge may attach an advisory risk assessment to a proposal, but it does not alter any gate in this flow and cannot authorize execution. Search requests and returned guidance are recorded as correlated `request` and `guidance` events before results are returned; the question is fingerprinted with a keyed HMAC, never stored raw, and the guidance references reconstruct the returned evidence from the verified revision. Proposal creation records a `proposal` event in the same transaction as the frozen-proposal insert, before the token is returned; a recording failure rolls back the creation. Proposal-bound approval is recorded and verified by the internal approval verifier (docs/adr/0003-approval-verifier-boundary.md): the proposing host cannot supply it, and the approval is spent exactly when its token is consumed. Standing authorization (docs/adr/0004-exact-standing-authorization.md) matches the frozen invocation against the complete permitted invocation — verified script identity, action, target, arguments, preconditions, runbook revision hash — as exact equality; missing or unequal fields never match, and there are no wildcards. Audit events are insert-only and redacted at write time; the pre-execution append commits in the same durable transaction as the token consumption, so a required audit failure refuses the execution. Runbook revisions are immutable and human-verified (docs/runbook-format.md); cited guidance qualifies as required procedural evidence only when bound to an unchanged revision. This entire flow is enforced by the execution gate (`src/ops_guard/gate.py`), which records a refusal for every failed check before any side effect.

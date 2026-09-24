@@ -105,7 +105,11 @@ class ExecutionGate:
         """Run every gate; dispatch only after the durable transaction commits.
 
         ``executor`` receives the frozen invocation and returns "success" or
-        "unknown"; a raised exception is recorded as "failure".
+        "unknown". A raised exception is recorded as "failure" with code
+        ``executor-error``, except a timeout (``TimeoutError``,
+        ``subprocess.TimeoutExpired``), which leaves completion unconfirmed
+        and is recorded as explicitly "unknown" with code
+        ``executor-timeout``; the exception propagates either way.
         """
         proposal_id: str | None = None
 

@@ -292,13 +292,18 @@ class ApprovalVerifier:
         Pass the returned callable as ``ProposalService.consume``'s
         ``same_transaction`` so the approval flip commits or rolls back with
         the token consumption (ADR 0002 rule 6 + ADR 0003 rule 4). The flip
-        re-checks inside the transaction that its own proposal is the one
-        transitioning; wiring this callback to a different token's consume
-        fails closed and rolls the whole unit back.
+        binds to the token digest actually being consumed in that
+        transaction (issue #19): wiring it to a different token's consume
+        fails closed and rolls the whole unit back. Verification after the
+        transition is a replay and fails closed.
         """
         token_digest = self._proposals.token_digest(token)
 
-        def append(conn: sqlite3.Connection) -> None:
+        def append(conn: sqlite3.Connection, consumed_digest: str) -> None:
+            if not hmac.compare_digest(consumed_digest, token_digest):
+                raise ApprovalError(
+                    "approval flip must join the consumption of its own proposal"
+                )
             row = conn.execute(
                 "SELECT state FROM proposals WHERE token_digest = ?", (token_digest,)
             ).fetchone()
@@ -320,11 +325,17 @@ class ApprovalVerifier:
         A standing-authorization dispatch needs no approval, but a proposal
         whose token is consumed must never leave a recorded approval behind
         (ADR 0003 rule 4: spent exactly when the token is consumed). Absent
-        approval: no-op. Already used: replay, fails the transaction.
+        approval: no-op. Already used: replay, fails the transaction. The
+        flip binds to the token digest actually being consumed (issue #19);
+        wiring it to a different token's consume fails the transaction.
         """
         token_digest = self._proposals.token_digest(token)
 
-        def append(conn: sqlite3.Connection) -> None:
+        def append(conn: sqlite3.Connection, consumed_digest: str) -> None:
+            if not hmac.compare_digest(consumed_digest, token_digest):
+                raise ApprovalError(
+                    "approval flip must join the consumption of its own proposal"
+                )
             row = conn.execute(
                 "SELECT state FROM proposals WHERE token_digest = ?", (token_digest,)
             ).fetchone()

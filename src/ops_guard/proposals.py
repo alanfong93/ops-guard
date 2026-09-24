@@ -240,7 +240,10 @@ class ProposalService:
                 self._check(fresh, digest, expected_digest, self._now())
                 raise ProposalError("consume did not apply although all checks passed")
             if same_transaction is not None:
-                same_transaction(GuardedConnection(conn))
+                # Second argument: the digest of the token this transaction
+                # is consuming — callbacks bind to exactly this consumption
+                # (issue #19; ADR 0003 rule 4).
+                same_transaction(GuardedConnection(conn), digest)
             final = conn.execute(
                 "SELECT * FROM proposals WHERE token_digest = ?", (digest,)
             ).fetchone()

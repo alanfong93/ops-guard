@@ -12,6 +12,7 @@ from hypothesis import strategies as st
 
 from ops_guard import (
     ApprovalAlreadyRecordedError,
+    ApprovalError,
     ApprovalOperatorMismatchError,
     ApprovalReplayedError,
     ApprovalStore,
@@ -258,14 +259,14 @@ def test_verifier_rejects_naive_clock(service, tmp_path) -> None:
 def test_approval_flip_rolls_back_with_the_consume(service, verifier) -> None:
     issued, _ = _recorded(verifier, service)
 
-    def failing_append(conn: sqlite3.Connection) -> None:
+    def failing_append(conn: sqlite3.Connection, _consumed_digest: str) -> None:
         raise RuntimeError("audit write failed")
 
     combined = verifier.mark_used_append(issued.token)
 
-    def both(conn: sqlite3.Connection) -> None:
-        combined(conn)
-        failing_append(conn)
+    def both(conn: sqlite3.Connection, consumed_digest: str) -> None:
+        combined(conn, consumed_digest)
+        failing_append(conn, consumed_digest)
 
     with pytest.raises(RuntimeError):
         service.consume(issued.token, same_transaction=both)
@@ -443,3 +444,32 @@ def test_no_operation_ordering_leaves_a_recorded_approval_on_a_consumed_proposal
             assert row is None or row[0] == "used", (
                 "a consumed proposal carries an unspent recorded approval"
             )
+
+
+def test_flip_cannot_ride_a_different_tokens_consume(service, verifier) -> None:
+    """Issue #19: the flip binds to the token digest actually being consumed
+    in that transaction (ADR 0003 rule 4). A flipless consume of B followed
+    by consume(A) wired to B's flip must roll the whole unit back — B's
+    approval stays recorded and A stays eligible."""
+    stranded = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    verifier.record_approval(stranded.token, operator_identity=OPERATOR)
+    service.consume(stranded.token)  # flipless: B consumed, approval recorded
+
+    victim = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    with pytest.raises(ApprovalError):
+        service.consume(
+            victim.token, same_transaction=verifier.mark_used_append(stranded.token)
+        )
+
+    # The mis-wired unit rolled back: the victim never consumed...
+    assert not service.resolve(victim.token).consumed
+    # ...and B's approval was not burned by it.
+    conn = sqlite3.connect(service.store._path)
+    try:
+        row = conn.execute(
+            "SELECT state FROM approvals WHERE token_digest = ?",
+            (service.token_digest(stranded.token),),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None and row[0] == "recorded"

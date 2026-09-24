@@ -72,7 +72,7 @@ class ProposalLifecycleMachine(RuleBasedStateMachine):
         eligible = sorted(t for t, r in self.tokens.items() if not r["consumed"])
         token = eligible[index % len(eligible)]
 
-        def failing_append(conn: sqlite3.Connection) -> None:
+        def failing_append(conn: sqlite3.Connection, _consumed_digest: str) -> None:
             raise RuntimeError("crash before commit")
 
         try:

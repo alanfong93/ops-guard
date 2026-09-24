@@ -151,7 +151,7 @@ def test_destructive_and_replacing_statements_are_blocked_at_the_seam(audit) -> 
         " event_type, evidence_refs, payload) VALUES (1, 'x', 1, 't', 'tampered', '[]', '{}')",
         "/* c */ DELETE FROM audit_events",
     ):
-        def hostile(conn: sqlite3.Connection, statement=statement) -> None:
+        def hostile(conn: sqlite3.Connection, _consumed_digest: str, statement=statement) -> None:
             conn.execute(statement)
             raise AssertionError("destructive SQL must be rejected first")
 
@@ -237,7 +237,7 @@ def test_required_audit_failure_rolls_back_token_consumption(audit) -> None:
     log, service = audit
     issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
 
-    def failing_append(conn: sqlite3.Connection) -> None:
+    def failing_append(conn: sqlite3.Connection, _consumed_digest: str) -> None:
         # A required audit write that cannot persist (unserializable payload).
         log.append_on(conn, "execution_start", payload={"bad": object()})
 
@@ -254,7 +254,7 @@ def test_gate_pairing_commits_start_with_the_consume(audit) -> None:
     log, service = audit
     issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
 
-    def append_start(conn: sqlite3.Connection) -> None:
+    def append_start(conn: sqlite3.Connection, _consumed_digest: str) -> None:
         log.append_on(
             conn,
             "execution_start",

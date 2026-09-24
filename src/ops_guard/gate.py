@@ -8,6 +8,13 @@ append (issue #9), and the approval flip (ADR 0003). Only after that
 transaction commits does the executor run; its outcome is recorded
 afterwards (success, failure, or an explicitly unknown completion).
 
+The gate resolves its own artifacts (issue #34; ADR 0004): the cited
+runbook revision comes from the verified runbook library by content hash,
+and the script bytes come from the authoritative configured source, whose
+exact bytes are hashed for the standing-authorization match, recorded as
+provenance, and passed unchanged to the executor. Caller-supplied
+documents, verification metadata, and script digests are never trusted.
+
 Every failed check records a refusal audit event before any side effect,
 and the executor is never called on a refusal. Two failure windows escape
 as exceptions by design, both after the refusal-recording capability is
@@ -19,6 +26,7 @@ module: it cannot authorize execution.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping
@@ -39,13 +47,11 @@ from ops_guard.errors import (
 )
 from ops_guard.invocation import Invocation, canonicalize_json
 from ops_guard.proposals import ProposalService
+from ops_guard.retrieval import RunbookLibrary
 from ops_guard.runbooks import (
     Citation,
     MalformedRunbookError,
-    TamperedRunbookError,
     UnknownPassageError,
-    UnverifiedRunbookError,
-    resolve_citation,
 )
 from ops_guard.store import AuditAppend, same_database
 
@@ -55,8 +61,7 @@ _OUTCOMES = {"success", "unknown"}
 @dataclass(frozen=True)
 class ExecutionRequest:
     token: str
-    script: ScriptIdentity
-    runbook_document: Mapping
+    script_path: str
     citation: Citation
     observed_preconditions: Mapping[str, str]
     operator_identity: str
@@ -80,6 +85,8 @@ class ExecutionGate:
         approvals: ApprovalVerifier,
         audit: AuditLog,
         *,
+        runbooks: RunbookLibrary,
+        script_source: Callable[[str], bytes],
         clock: Callable[[], datetime],
     ) -> None:
         # One durable transaction boundary (issue #36): the execution-start
@@ -92,19 +99,32 @@ class ExecutionGate:
                 "audit store must share the proposal database: "
                 f"proposals={proposals.store.path!r}, audit={audit.store.path!r}"
             )
+        if not isinstance(runbooks, RunbookLibrary):
+            raise GateConfigurationError(
+                "the gate resolves evidence from a verified RunbookLibrary"
+            )
+        if not callable(script_source):
+            raise GateConfigurationError(
+                "script_source must resolve a script path to its exact bytes"
+            )
         self._proposals = proposals
         self._approvals = approvals
         self._audit = audit
+        self._runbooks = runbooks
+        self._script_source = script_source
         self._clock = clock
 
     def execute(
         self,
         request: ExecutionRequest,
-        executor: Callable[[Invocation], str],
+        executor: Callable[[Invocation, bytes], str],
     ) -> GateOutcome:
         """Run every gate; dispatch only after the durable transaction commits.
 
-        ``executor`` receives the frozen invocation and returns "success" or
+        The gate resolves the cited revision from the verified runbook
+        library and the script bytes from the authoritative source before
+        anything is consumed; ``executor`` receives the frozen invocation
+        and exactly those resolved bytes, and returns "success" or
         "unknown". An exception from the executor run or its report
         validation is recorded as follows: timeouts (``TimeoutError``,
         ``subprocess.TimeoutExpired``) leave completion unconfirmed and are
@@ -136,16 +156,36 @@ class ExecutionGate:
                 outcome="refused",
             )
 
-        # 1. Evidence: the cited passage must resolve against an intact,
-        #    human-verified revision. A refusal-append failure here escapes
-        #    as AuditWriteFailure — fail-closed by design (the audit store
-        #    being down must not look like a clean refusal).
+        # 1. Evidence: the cited passage must resolve against a revision the
+        #    verified runbook library holds — never against caller-supplied
+        #    document content or verification metadata (issue #34). A
+        #    refusal-append failure here escapes as AuditWriteFailure —
+        #    fail-closed by design (the audit store being down must not look
+        #    like a clean refusal).
         try:
-            evidence = resolve_citation(request.runbook_document, request.citation)
-        except (MalformedRunbookError, UnverifiedRunbookError, TamperedRunbookError, UnknownPassageError) as error:
+            evidence = self._runbooks.resolve_citation(request.citation)
+        except (MalformedRunbookError, UnknownPassageError) as error:
             return refuse(f"evidence rejected: {error}")
 
-        # 2. Token validity and frozen-invocation revalidation.
+        # 2. Script resolution: the exact bytes come from the authoritative
+        #    configured source and their SHA-256 is the only script digest
+        #    this gate reasons about (issue #34; ADR 0004) — the caller
+        #    names the path, never the hash. The source is the operator's
+        #    trust boundary: whatever it returns for a path IS the artifact
+        #    that path names. Resolution failure — including a non-bytes
+        #    return — is a refusal, before any consumption or side effect.
+        try:
+            script_bytes = self._script_source(request.script_path)
+            if not isinstance(script_bytes, bytes):
+                raise TypeError("script_source must resolve a path to bytes")
+            resolved_script = ScriptIdentity(
+                path=request.script_path,
+                sha256=hashlib.sha256(script_bytes).hexdigest(),
+            )
+        except (OSError, LookupError, ValueError, TypeError) as error:
+            return refuse(f"script could not be resolved: {error}")
+
+        # 3. Token validity and frozen-invocation revalidation.
         try:
             frozen = self._proposals.resolve(request.token, expected_digest=request.expected_digest)
         except UnknownTokenError as error:
@@ -158,7 +198,7 @@ class ExecutionGate:
             return refuse(f"token rejected: {error}")
         proposal_id = frozen.proposal_id
 
-        # 3. The frozen invocation must be the one the evidence describes —
+        # 4. The frozen invocation must be the one the evidence describes —
         #    including the runbook revision binding (runbook-format.md: the
         #    gate binds proposals to the revision content hash).
         if (
@@ -189,14 +229,15 @@ class ExecutionGate:
                 )
 
         # 5. Exactly one valid authorization path: standing match, else
-        #    proposal-bound approval. On the approval path, request.script is
-        #    recorded as supplied — the MCP layer (#16) must resolve and
-        #    verify the script actually executed against it.
+        #    proposal-bound approval. The match compares the RESOLVED script
+        #    identity — digest of the exact source bytes — against the
+        #    authorization (issue #34); both paths dispatch only the
+        #    resolved bytes, and their provenance is what gets recorded.
         path: str | None = None
         refusal_bits: list[str] = []
         if request.standing is not None:
             try:
-                standing_result = match(request.standing, frozen.invocation, request.script)
+                standing_result = match(request.standing, frozen.invocation, resolved_script)
             except ProposalError as error:
                 standing_result = None
                 refusal_bits.append(f"standing: {error}")
@@ -231,8 +272,8 @@ class ExecutionGate:
                 "execution_start",
                 payload={
                     "phase": "pre-execution",
-                    "script_path": request.script.path,
-                    "script_sha256": request.script.sha256,
+                    "script_path": resolved_script.path,
+                    "script_sha256": resolved_script.sha256,
                 },
                 correlation_id=frozen.proposal_id,
                 proposal_ref=frozen.proposal_id,
@@ -260,11 +301,13 @@ class ExecutionGate:
         except (ProposalError, ApprovalError, AuditWriteFailure) as error:
             return refuse(f"dispatch refused: {error}")
 
-        # 7. Side effect, then the outcome record. A BaseException (e.g.
+        # 7. Side effect, then the outcome record. The executor runs on the
+        #    exact bytes the gate resolved and hashed — never a re-read of
+        #    the path (issue #34, no TOCTOU gap). A BaseException (e.g.
         #    SystemExit) is recorded as a failure before it propagates so the
         #    execution never ends without an outcome attempt.
         try:
-            reported = executor(consumed.invocation)
+            reported = executor(consumed.invocation, script_bytes)
             if reported not in _OUTCOMES:
                 raise ValueError(
                     f"executor must report success or unknown, got {reported!r}"

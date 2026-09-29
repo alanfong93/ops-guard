@@ -282,6 +282,28 @@ def test_reconciliation_failure_aborts_startup_before_binding(tmp_path) -> None:
     assert handle.port is None
 
 
+def test_unusable_database_path_fails_startup_as_typed_error(tmp_path) -> None:
+    from ops_guard.service import ServiceConfig, StartupError, build_http_server
+
+    cert_path, key_path = _write_test_certificate(tmp_path)
+    config = ServiceConfig(
+        bearer_token=BEARER_TOKEN,
+        proposal_token_key=bytes.fromhex("a" * 64),
+        audit_fingerprint_key=bytes.fromhex("b" * 64),
+        db_path=str(tmp_path / "missing-dir" / "service.db"),
+        runbook_dir=PUBLIC_CORPUS,
+        bind_host="127.0.0.1",
+        port=0,
+        tls_certfile=cert_path,
+        tls_keyfile=key_path,
+        allowed_hosts=("localhost",),
+        allowed_origins=("https://ops-guard.lan",),
+    )
+    with pytest.raises(StartupError) as raised:
+        build_http_server(config)
+    assert "OPS_GUARD_DB_PATH" in str(raised.value)
+
+
 def test_startup_does_not_log_secret_values(service, capsys) -> None:
     captured = capsys.readouterr()
     out = captured.out + captured.err

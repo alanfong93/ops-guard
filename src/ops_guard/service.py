@@ -17,6 +17,7 @@ import hmac
 import json
 import os
 import socket
+import sqlite3
 import ssl
 import sys
 from dataclasses import dataclass
@@ -41,12 +42,11 @@ class StartupError(Exception):
     """Startup could not complete (bad paths, unreadable inputs, TLS)."""
 
 
-def parse_allowlist(raw: str) -> tuple[str, ...]:
+def parse_allowlist(raw: str, *, variable: str) -> tuple[str, ...]:
     entries = tuple(entry.strip() for entry in raw.split(",") if entry.strip())
     if not entries:
         raise ConfigurationError(
-            "OPS_GUARD_ALLOWED_HOSTS / OPS_GUARD_ALLOWED_ORIGINS: "
-            "allowlists must contain at least one non-blank entry"
+            f"{variable} must contain at least one non-blank comma-separated entry"
         )
     return entries
 
@@ -107,8 +107,12 @@ def load_config(environ: Mapping[str, str]) -> ServiceConfig:
         raise ConfigurationError("OPS_GUARD_PORT must be an integer between 1 and 65535")
     tls_certfile = _required(environ, "OPS_GUARD_TLS_CERTFILE")
     tls_keyfile = _required(environ, "OPS_GUARD_TLS_KEYFILE")
-    allowed_hosts = parse_allowlist(_required(environ, "OPS_GUARD_ALLOWED_HOSTS"))
-    allowed_origins = parse_allowlist(_required(environ, "OPS_GUARD_ALLOWED_ORIGINS"))
+    allowed_hosts = parse_allowlist(
+        _required(environ, "OPS_GUARD_ALLOWED_HOSTS"), variable="OPS_GUARD_ALLOWED_HOSTS"
+    )
+    allowed_origins = parse_allowlist(
+        _required(environ, "OPS_GUARD_ALLOWED_ORIGINS"), variable="OPS_GUARD_ALLOWED_ORIGINS"
+    )
     return ServiceConfig(
         bearer_token=bearer_token,
         proposal_token_key=proposal_token_key,
@@ -125,9 +129,16 @@ def load_config(environ: Mapping[str, str]) -> ServiceConfig:
 
 
 def validate_tls_pair(certfile: str, keyfile: str) -> ssl.SSLContext:
-    """Load the certificate chain and key together; any problem fails startup."""
+    """Load the certificate chain and key together; any problem fails startup
+    with the typed startup error, never a raw traceback."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(certfile, keyfile)
+    try:
+        context.load_cert_chain(certfile, keyfile)
+    except (ssl.SSLError, OSError) as error:
+        raise StartupError(
+            "OPS_GUARD_TLS_CERTFILE / OPS_GUARD_TLS_KEYFILE: "
+            f"certificate and key must be a loadable PEM pair ({type(error).__name__})"
+        ) from error
     return context
 
 
@@ -201,18 +212,24 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog]:
     print(f"[ops-guard] serving {len(documents)} runbook revision(s) from {config.runbook_dir}", flush=True)
 
     clock = default_clock
-    audit = AuditLog(
-        AuditStore(config.db_path),
-        fingerprint_key=config.audit_fingerprint_key,
-        clock=clock,
-    )
-    ProposalService(
-        ProposalStore(config.db_path),
-        token_key=config.proposal_token_key,
-        clock=clock,
-        audit=audit,
-    )
-    reconciliations = reconcile_interrupted_executions(audit)
+    try:
+        audit = AuditLog(
+            AuditStore(config.db_path),
+            fingerprint_key=config.audit_fingerprint_key,
+            clock=clock,
+        )
+        ProposalService(
+            ProposalStore(config.db_path),
+            token_key=config.proposal_token_key,
+            clock=clock,
+            audit=audit,
+        )
+        reconciliations = reconcile_interrupted_executions(audit)
+    except (sqlite3.Error, OSError) as error:
+        raise StartupError(
+            f"OPS_GUARD_DB_PATH: audit/proposal store must be initializable at "
+            f"{config.db_path} ({type(error).__name__})"
+        ) from error
     counts: dict[str, int] = {}
     for reconciliation in reconciliations:
         counts[reconciliation.action] = counts.get(reconciliation.action, 0) + 1

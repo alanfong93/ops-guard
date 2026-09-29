@@ -146,17 +146,19 @@ def test_port_must_be_in_range() -> None:
 
 
 def test_allowlist_parsing_drops_empties_and_strips_whitespace() -> None:
-    assert parse_allowlist(" ops-guard.lan , , localhost ,,") == ("ops-guard.lan", "localhost")
+    assert parse_allowlist(" ops-guard.lan , , localhost ,,", variable="V") == ("ops-guard.lan", "localhost")
 
 
-def test_empty_allowlist_is_rejected() -> None:
+def test_empty_allowlist_is_rejected_naming_the_variable() -> None:
     with pytest.raises(ConfigurationError) as raised:
-        parse_allowlist(" , ,")
-    assert "OPS_GUARD_ALLOWED" in str(raised.value) or "allowlist" in str(raised.value).lower()
+        parse_allowlist(" , ,", variable="OPS_GUARD_ALLOWED_HOSTS")
+    assert "OPS_GUARD_ALLOWED_HOSTS" in str(raised.value)
 
 
 def test_missing_tls_files_fail_validation(tmp_path) -> None:
-    with pytest.raises(Exception):
+    from ops_guard.service import StartupError
+
+    with pytest.raises(StartupError):
         validate_tls_pair(str(tmp_path / "absent.pem"), str(tmp_path / "absent-key.pem"))
 
 
@@ -195,13 +197,17 @@ def _write_pem(tmp_path, *, name: str, **kwargs) -> tuple[str, str]:
 
 
 def test_valid_tls_pair_loads(tmp_path) -> None:
+    from ops_guard.service import StartupError  # noqa: F401  (contract: typed startup errors)
+
     cert_path, key_path = _write_pem(tmp_path, name="pair")
     context = validate_tls_pair(cert_path, key_path)
     assert isinstance(context, ssl.SSLContext)
 
 
 def test_mismatched_certificate_and_key_fail_validation(tmp_path) -> None:
+    from ops_guard.service import StartupError
+
     cert_a, key_a = _write_pem(tmp_path, name="a")
     cert_b, key_b = _write_pem(tmp_path, name="b")
-    with pytest.raises(Exception):
+    with pytest.raises(StartupError):
         validate_tls_pair(cert_a, key_b)

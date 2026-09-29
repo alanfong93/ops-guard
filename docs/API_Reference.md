@@ -160,6 +160,14 @@ with `AuditWriteFailure` and no result is returned unlogged. Invalid input
 (empty question, `limit` below 1) is rejected before any event is written;
 no attempt events exist for rejected input.
 
+## Approval recording boundary
+
+Approvals are recorded only through the internal verifier. The opt-in
+Telegram transport ([ADR 0010](adr/0010-telegram-approval-transport.md))
+delivers previews and accepts the operator's callback over the Bot API; **no
+approval MCP tool and no public HTTP approval endpoint exists**, and no
+callback can recover a proposal token.
+
 ## Proposal creation recording
 
 `open_proposal` appends one **`proposal`** event in the same transaction as

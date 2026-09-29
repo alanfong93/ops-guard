@@ -107,7 +107,7 @@ class ServiceHandle:
     def start(self) -> "ServiceHandle":
         from ops_guard.service import build_http_server
 
-        app, audit = build_http_server(self.config)
+        app, audit, _proposals = build_http_server(self.config)
         self.audit = audit
         uvicorn_config = uvicorn.Config(
             app,
@@ -263,7 +263,7 @@ def test_reconciliation_runs_before_the_listener(tmp_path, capsys) -> None:
     assert handle.port is None  # nothing bound yet
     from ops_guard.service import build_http_server
 
-    app, audit = build_http_server(handle.config)
+    app, audit, _proposals = build_http_server(handle.config)
     captured = capsys.readouterr().out
     assert app is not None
     # A fresh database recovers nothing; the report is counts only.

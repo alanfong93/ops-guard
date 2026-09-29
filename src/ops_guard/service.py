@@ -20,6 +20,7 @@ import socket
 import sqlite3
 import ssl
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Mapping
@@ -29,6 +30,7 @@ from local_judge.ollama import UrllibOllamaTransport
 
 from ops_guard.audit import AuditLog, AuditStore
 from ops_guard.proposal_tool import DEFAULT_PROPOSAL_TTL_SECONDS
+from ops_guard.telegram_approval import ApprovalConfigError
 from ops_guard.proposals import ProposalService, default_clock
 from ops_guard.recovery import reconcile_interrupted_executions
 from ops_guard.retrieval import RunbookLibrary, build_mcp_server
@@ -279,20 +281,108 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog]:
         allowed_hosts=list(config.allowed_hosts),
         allowed_origins=list(config.allowed_origins),
     )
-    return app, audit
+    return app, audit, proposals
+
+
+class _ApprovalRuntime:
+    """Started approval loops with a shared stop event (ADR 0010)."""
+
+    def __init__(self, *, notifier, poller) -> None:
+        self.stop_event = threading.Event()
+        self.notifier = notifier
+        self.poller = poller
+        self.notifier._stop = self.stop_event
+        self.poller._stop = self.stop_event
+        self.threads = [
+            threading.Thread(target=notifier.run, daemon=True),
+            threading.Thread(target=poller.run, daemon=True),
+        ]
+
+    def start(self) -> None:
+        for thread in self.threads:
+            thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        for thread in self.threads:
+            thread.join(timeout=10)
+
+
+def build_approval_runtime(environment: Mapping[str, str], audit, proposals, clock):
+    """Opt-in Telegram approval runtime (issue #61; ADR 0010).
+
+    Returns None when approvals are disabled; otherwise the poller and
+    notifier, not yet started. Malformed enabled-configuration fails here,
+    before a listener opens."""
+    from ops_guard.approvals import ApprovalStore, ApprovalVerifier
+    from ops_guard.telegram_approval import (
+        ApprovalConfigError,
+        ApprovalNotifier,
+        ApprovalPoller,
+        TelegramBotClient,
+        load_approval_config,
+    )
+
+    approval_config = load_approval_config(environment)
+    if approval_config is None:
+        return None
+    verifier = ApprovalVerifier(
+        ApprovalStore(proposals.store.path),
+        proposals,
+        operator_identity=approval_config.operator_identity,
+        clock=clock,
+    )
+    client = TelegramBotClient(approval_config.bot_token)
+    notifier = ApprovalNotifier(
+        client,
+        proposals,
+        audit=audit,
+        operator_chat_id=approval_config.operator_chat_id,
+        clock=clock,
+    )
+    poller = ApprovalPoller(
+        client,
+        verifier,
+        operator_user_id=approval_config.operator_user_id,
+        operator_chat_id=approval_config.operator_chat_id,
+        operator_identity=approval_config.operator_identity,
+        clock=clock,
+    )
+    return _ApprovalRuntime(notifier=notifier, poller=poller)
 
 
 def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> int:
-    """Entry point for ``python -m ops_guard`` (ADR 0006)."""
+    """Entry point for ``python -m ops_guard`` (ADR 0006, ADR 0010)."""
     import uvicorn
 
     environment = os.environ if environ is None else environ
     try:
         config = load_config(environment)
-        app, _audit = build_http_server(config)
+        app, audit, proposals = build_http_server(config)
     except (ConfigurationError, StartupError) as error:
         print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
         return 2
+    try:
+        runtime = build_approval_runtime(environment, audit, proposals, default_clock)
+    except ApprovalConfigError as error:
+        print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
+        return 2
+    if runtime is not None:
+        runtime.start()
+        print("[ops-guard] approval transport enabled (Telegram, private operator DM)", flush=True)
+    try:
+        uvicorn.run(
+            app,
+            host=config.bind_host,
+            port=config.port,
+            ssl_certfile=config.tls_certfile,
+            ssl_keyfile=config.tls_keyfile,
+            log_level="info",
+        )
+    finally:
+        if runtime is not None:
+            runtime.stop()
+    return 0
     print(
         f"[ops-guard] serving search_runbook on https://{config.bind_host}:{config.port}"
         " (bearer-authenticated, Host/Origin allowlisted)",

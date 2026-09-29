@@ -243,6 +243,55 @@ class ApprovalVerifier:
                 ) from error
         return record
 
+    def record_approval_by_proposal_id(
+        self, proposal_id: str, *, operator_identity: str
+    ) -> ApprovalRecord:
+        """Internal operator path keyed by proposal id, not by token (issue #61).
+
+        The Telegram transport knows only the proposal id — the raw token is
+        never carried, recovered, or logged. The configured-operator gate,
+        the BEGIN IMMEDIATE eligibility revalidation, the stored
+        ``token_digest`` binding, and the one-approval uniqueness rule are
+        exactly the token path's (ADR 0003): an unknown, tampered, consumed,
+        or expired proposal is rejected with the lifecycle's typed errors
+        and no row is written; a replay cannot create a second approval.
+        """
+        if not self._identity_matches(operator_identity):
+            raise ApprovalOperatorMismatchError(
+                "only the configured operator may record approval"
+            )
+        with self._proposals.store.transaction() as conn:
+            now = self._now()
+            frozen = self._proposals.fetch_by_id_on(conn, proposal_id)
+            record = ApprovalRecord(
+                approval_id=uuid.uuid4().hex,
+                token_digest=frozen.token_digest,
+                proposal_id=frozen.proposal_id,
+                operator_identity=self._operator_identity,
+                invocation_digest=frozen.invocation_digest,
+                runbook_revision_hash=frozen.invocation.runbook_revision_hash,
+                expires_at=frozen.expires_at,
+                created_at=now,
+                used=False,
+            )
+            try:
+                ApprovalStore.insert_on(
+                    conn,
+                    approval_id=record.approval_id,
+                    token_digest=record.token_digest,
+                    proposal_id=record.proposal_id,
+                    operator_identity=record.operator_identity,
+                    invocation_digest=record.invocation_digest,
+                    runbook_revision_hash=record.runbook_revision_hash,
+                    expires_at=format_timestamp(record.expires_at),
+                    created_at=format_timestamp(record.created_at),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ApprovalAlreadyRecordedError(
+                    "this proposal already carries an approval"
+                ) from error
+        return record
+
     def verify(self, token: str, *, operator_identity: str) -> ApprovalDecision:
         """Read-only check of a proposal-bound approval (ADR 0003, rule 6).
 

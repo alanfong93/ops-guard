@@ -215,6 +215,19 @@ class ProposalService:
         self._check(row, digest, expected_digest, self._now())
         return _row_to_proposal(row)
 
+    def fetch_by_id_on(self, conn: sqlite3.Connection, proposal_id: str) -> FrozenProposal:
+        """Load a frozen proposal by id inside a caller-owned transaction
+        (issue #61). Same tamper re-derivation and typed rejections as the
+        token path: unknown, tampered, consumed, and expired proposals are
+        rejected before any caller trusts the content."""
+        if not isinstance(proposal_id, str) or not proposal_id:
+            raise UnknownTokenError("no proposal is bound to this id")
+        row = conn.execute(
+            "SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)
+        ).fetchone()
+        self._check(row, "", None, self._now())
+        return _row_to_proposal(row)
+
     def consume(
         self,
         token: str,

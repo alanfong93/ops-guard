@@ -21,11 +21,13 @@ import sqlite3
 import ssl
 import sys
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Mapping
 
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
 from ops_guard.audit import AuditLog, AuditStore
+from ops_guard.proposal_tool import DEFAULT_PROPOSAL_TTL_SECONDS
 from ops_guard.proposals import ProposalService, default_clock
 from ops_guard.recovery import reconcile_interrupted_executions
 from ops_guard.retrieval import RunbookLibrary, build_mcp_server
@@ -64,6 +66,7 @@ class ServiceConfig:
     tls_keyfile: str
     allowed_hosts: tuple[str, ...]
     allowed_origins: tuple[str, ...]
+    proposal_ttl_seconds: int
 
 
 def _required(environ: Mapping[str, str], name: str) -> str:
@@ -113,6 +116,20 @@ def load_config(environ: Mapping[str, str]) -> ServiceConfig:
     allowed_origins = parse_allowlist(
         _required(environ, "OPS_GUARD_ALLOWED_ORIGINS"), variable="OPS_GUARD_ALLOWED_ORIGINS"
     )
+    raw_ttl = environ.get("OPS_GUARD_PROPOSAL_TTL_SECONDS")
+    if raw_ttl is None:
+        proposal_ttl_seconds = DEFAULT_PROPOSAL_TTL_SECONDS
+    else:
+        try:
+            proposal_ttl_seconds = int(raw_ttl.strip())
+        except ValueError as error:
+            raise ConfigurationError(
+                "OPS_GUARD_PROPOSAL_TTL_SECONDS must be a positive integer number of seconds"
+            ) from error
+        if proposal_ttl_seconds <= 0:
+            raise ConfigurationError(
+                "OPS_GUARD_PROPOSAL_TTL_SECONDS must be a positive integer number of seconds"
+            )
     return ServiceConfig(
         bearer_token=bearer_token,
         proposal_token_key=proposal_token_key,
@@ -125,6 +142,7 @@ def load_config(environ: Mapping[str, str]) -> ServiceConfig:
         tls_keyfile=tls_keyfile,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
+        proposal_ttl_seconds=proposal_ttl_seconds,
     )
 
 
@@ -218,7 +236,7 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog]:
             fingerprint_key=config.audit_fingerprint_key,
             clock=clock,
         )
-        ProposalService(
+        proposals = ProposalService(
             ProposalStore(config.db_path),
             token_key=config.proposal_token_key,
             clock=clock,
@@ -242,7 +260,13 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog]:
     )
 
     verifier = StaticBearerVerifier(config.bearer_token)
-    server = build_mcp_server(library, audit, auth=verifier)
+    server = build_mcp_server(
+        library,
+        audit,
+        auth=verifier,
+        proposals=proposals,
+        proposal_ttl=timedelta(seconds=config.proposal_ttl_seconds),
+    )
     tls_context = validate_tls_pair(config.tls_certfile, config.tls_keyfile)
     app = server.http_app(
         transport="streamable-http",

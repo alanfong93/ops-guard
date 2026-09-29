@@ -122,6 +122,24 @@ class _SchemaForwardingPort:
         )
 
 
+class ThinkDisabledTransport:
+    """Injects Ollama's ``think: false`` backend toggle at the transport
+    boundary (ADR 0009 amendment, 2026-09-29).
+
+    qwen3's thinking mode (Ollama 0.34 default) postdates the profile's
+    calibration: with it on, a warm structured sample takes ~11 s, making
+    the fixed 10 s per-sample budget infeasible and every advisory a
+    timeout. Disabling it restores the latency profile the design evaluated.
+    This is a backend toggle, not a native inference setting: the pinned
+    local-judge request/result contract is untouched."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def post(self, path: str, payload: Mapping[str, Any], timeout_ms: int):
+        return self._inner.post(path, {**payload, "think": False}, timeout_ms)
+
+
 def _resolve_model_digest(transport) -> str | None:
     """Best-effort Ollama manifest digest; provenance only, never blocking."""
     try:
@@ -150,7 +168,9 @@ class LocalJudge:
         transport=None,
         fingerprint: Callable[[Any], str] | None = None,
     ) -> None:
-        self._transport = transport if transport is not None else UrllibOllamaTransport()
+        self._transport = ThinkDisabledTransport(
+            transport if transport is not None else UrllibOllamaTransport()
+        )
         self._fingerprint = fingerprint
         self._digest = _resolve_model_digest(self._transport)
         # The validator takes ModelProfile specs (settings it may honor);

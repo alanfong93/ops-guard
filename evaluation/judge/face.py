@@ -289,5 +289,6 @@ def _trace_from(entry: dict):
 
 def _default_transport():
     from local_judge.ollama import UrllibOllamaTransport
+    from ops_guard.judge import ThinkDisabledTransport
 
-    return UrllibOllamaTransport()
+    return ThinkDisabledTransport(UrllibOllamaTransport())

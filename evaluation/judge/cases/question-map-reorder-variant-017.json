@@ -22,13 +22,13 @@
   "rationale": "Variant for question-map-reorder (pair 17): question map reordered, same fixed state/menu/profile.",
   "state": {
     "evidence": {
-      "content_hash": "acfc836738d7209f8408cd62edeed17b7a7273107b3abf8de0f1f1fd350264b7",
-      "locator": "update/ordering",
+      "content_hash": "3474a9571a6838058629a46b4405067e4182c1cb87a9d87dfcf149f01a42c63c",
+      "locator": "update/steps",
       "operation": {
-        "action": "verify",
+        "action": "update",
         "target": "n8n"
       },
-      "passage_text": "When both services are updated, update n8n first and OpenWebUI second. The n8n compose configuration declares a shared network as external; updating OpenWebUI first removes that network, so the n8n update cannot start.",
+      "passage_text": "Update n8n by pulling the pinned image, stopping the running containers, rebuilding, and restarting. Every update causes temporary downtime for all n8n workflows until the containers are back.",
       "preconditions": [
         {
           "expected": "running",
@@ -39,10 +39,10 @@
       "runbook_id": "n8n-update"
     },
     "invocation": {
-      "action": "rotate",
+      "action": "update",
       "arguments": {
-        "grace_seconds": 300,
-        "service": "n8n"
+        "image": "n8nio/n8n",
+        "pin": "stable"
       },
       "preconditions": [
         {
@@ -50,7 +50,7 @@
           "name": "docker-engine"
         }
       ],
-      "target": "api-key"
+      "target": "n8n"
     },
     "schema_version": "ops-guard-risk-state-v1"
   }

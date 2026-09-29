@@ -184,7 +184,7 @@ def main() -> int:
     print(f"corpus {manifest['corpus_version']}: {manifest['case_count']} cases verified")
     if args.check:
         return 0
-    report = run(live=True)
+    report = run()
     write_report(report)
     gates = {g["gate"]: g["pass"] for g in report["authoritative"]["gates"]}
     print("gates:", json.dumps(gates))

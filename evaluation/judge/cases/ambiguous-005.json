@@ -54,16 +54,16 @@
   "case_class": "ambiguous",
   "case_id": "ambiguous-005",
   "question_id": "risk_class",
-  "rationale": "An in-place configuration tweak with a short rollback window.",
+  "rationale": "Update one workflow's settings and restart its container: small blast radius, but the restart pauses that workflow's executions.",
   "state": {
     "evidence": {
-      "content_hash": "acfc836738d7209f8408cd62edeed17b7a7273107b3abf8de0f1f1fd350264b7",
-      "locator": "update/ordering",
+      "content_hash": "6972893654adbf6c48be195addd2832092fc93a4cef022a6adae12c40eb4c624",
+      "locator": "workflow/update",
       "operation": {
-        "action": "verify",
-        "target": "n8n"
+        "action": "update",
+        "target": "n8n-workflow"
       },
-      "passage_text": "When both services are updated, update n8n first and OpenWebUI second. The n8n compose configuration declares a shared network as external; updating OpenWebUI first removes that network, so the n8n update cannot start.",
+      "passage_text": "Adjust a single workflow's settings and restart its container. The change is small and reverted by restoring the previous settings, but the restart pauses the workflow's in-flight executions until it is back.",
       "preconditions": [
         {
           "expected": "running",
@@ -76,7 +76,8 @@
     "invocation": {
       "action": "update",
       "arguments": {
-        "mode": "patch"
+        "restart": true,
+        "workflow": "daily-digest"
       },
       "preconditions": [
         {
@@ -84,7 +85,7 @@
           "name": "docker-engine"
         }
       ],
-      "target": "n8n"
+      "target": "n8n-workflow"
     },
     "schema_version": "ops-guard-risk-state-v1"
   }

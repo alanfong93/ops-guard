@@ -35,3 +35,7 @@ Local inference runs before `ProposalService.open_proposal()` enters its SQLite 
 - The audit event preserves a privacy-safe reconstruction reference (citation refs + proposal/invocation refs + request fingerprint) rather than the raw input.
 - Cold-start timeouts (~53–142 s measured cold loads vs the fixed 10 s per-sample budget) record `judge_timeout`; three sequential client attempt budgets total about 30 s, which is not an end-to-end service deadline.
 - The S7-6 report must count timeout/unavailable results against coverage; no judge result is returned to the host or used by execution until #65 is planned after the evaluation passes.
+
+## Amendment (2026-09-29, issue #60)
+
+The fixed `qwen3:8b` profile is evaluated and served with Ollama's `think: false` backend toggle, injected at the ops-guard transport boundary (the pinned local-judge library is untouched). qwen3's thinking mode — the Ollama 0.34 default — postdates the profile's latency calibration: with it on, a warm structured sample measures ~11 s, making the fixed 10 s per-sample budget infeasible and every advisory a `judge_timeout`. Disabling thinking restores the non-thinking latency profile (~3–6 s warm) the budget was set from. The native request/result contract, schema forwarding, and all other fixed settings are unchanged; tests pin the toggle's presence.

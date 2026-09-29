@@ -563,3 +563,70 @@ def test_clean_shutdown_stops_loops(harness) -> None:
     for thread in threads:
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+def test_malformed_bot_token_shape_fails_startup() -> None:
+    environ = base_environ()
+    environ["OPS_GUARD_TELEGRAM_BOT_TOKEN"] = "not-a-real-bot-token-but-long"
+    with pytest.raises(ApprovalConfigError) as raised:
+        load_approval_config(environ)
+    assert "OPS_GUARD_TELEGRAM_BOT_TOKEN" in str(raised.value)
+
+
+def test_retry_after_is_honored_uncapped() -> None:
+    harness = None
+    from ops_guard.telegram_approval import ApprovalNotifier as N
+
+    slept = []
+    stop = threading.Event()
+    stop.wait = slept.append
+    clock = FakeClock()
+    notifier = N.__new__(N)
+    notifier._client = None
+    notifier._service = None
+    notifier._audit = None
+    notifier._chat_id = OPERATOR_CHAT
+    notifier._clock = clock
+    notifier._poll_interval = 30.0
+    notifier._stop = stop
+    notifier._backoff_cap = 60.0
+    notifier._sent = set()
+
+    def raise_retry_after(frozen):
+        raise TelegramRetryAfter(90.0)
+
+    sentinel = type("F", (), {"proposal_id": "p" * 32})()
+    notifier.active_unapproved = lambda: [sentinel]
+    notifier.deliver = raise_retry_after
+    notifier.scan_once()
+    assert slept == [90.0]  # Telegram's value is authoritative, never capped
+
+
+def test_notifier_survives_transient_storage_errors(tmp_path) -> None:
+    harness = Harness(tmp_path)
+    from ops_guard.invocation import Invocation
+
+    harness.service.open_proposal(
+        Invocation(
+            action="restart",
+            target="n8n",
+            arguments={},
+            preconditions=[],
+            runbook_revision_hash="b" * 64,
+        ),
+        ttl=timedelta(minutes=15),
+    )
+    notifier = make_notifier(harness)
+    slept = []
+    notifier._stop.wait = slept.append
+    real = notifier.active_unapproved
+    state = {"fail": True}
+
+    def flaky():
+        if state["fail"]:
+            state["fail"] = False
+            raise sqlite3.OperationalError("database is locked")
+        return real()
+
+    notifier.active_unapproved = flaky
+    assert notifier.scan_once() == []  # survived the storage error
+    assert notifier.scan_once() == [harness.service.store and notifier.active_unapproved()[0].proposal_id]

@@ -85,8 +85,10 @@ def load_approval_config(environ: Mapping[str, str]) -> ApprovalConfig | None:
         return value
 
     bot_token = required("OPS_GUARD_TELEGRAM_BOT_TOKEN")
-    if len(bot_token) < 16:
-        raise ApprovalConfigError("OPS_GUARD_TELEGRAM_BOT_TOKEN is malformed")
+    if not re.fullmatch(r"[0-9]{6,12}:[A-Za-z0-9_-]{20,}", bot_token):
+        raise ApprovalConfigError(
+            "OPS_GUARD_TELEGRAM_BOT_TOKEN is malformed (expected <bot id>:<secret>)"
+        )
 
     def numeric(name: str) -> int:
         raw = required(name)
@@ -327,14 +329,21 @@ class ApprovalNotifier:
         return True
 
     def scan_once(self) -> list[str]:
+        try:
+            candidates = self.active_unapproved()
+        except sqlite3.Error:
+            # transient storage failure: survive and retry next scan
+            self._sleep(min(5.0, self._backoff_cap))
+            return []
         delivered: list[str] = []
-        for frozen in self.active_unapproved():
+        for frozen in candidates:
             if frozen.proposal_id in self._sent:
                 continue
             try:
                 self.deliver(frozen)
             except TelegramRetryAfter as error:
-                self._sleep(min(error.retry_after, self._backoff_cap))
+                # Telegram's own value is authoritative: never capped
+                self._sleep(error.retry_after)
                 continue
             except TelegramTransportError:
                 self._sleep(min(5.0, self._backoff_cap))
@@ -442,7 +451,7 @@ class ApprovalPoller:
         try:
             updates = self._client.get_updates(self._offset)
         except TelegramRetryAfter as error:
-            self._stop.wait(min(error.retry_after, self._backoff_cap))
+            self._stop.wait(error.retry_after)  # Telegram's value: authoritative
             return
         except TelegramTransportError:
             self._stop.wait(min(5.0, self._backoff_cap))

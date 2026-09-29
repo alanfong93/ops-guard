@@ -1,0 +1,42 @@
+{
+  "runbook_id": "n8n-update",
+  "revision": "2026-09-29.1",
+  "operation": {
+    "action": "update",
+    "target": "n8n"
+  },
+  "preconditions": [
+    {
+      "name": "docker-engine",
+      "expected": "running"
+    }
+  ],
+  "passages": [
+    {
+      "locator": "update/ordering",
+      "text": "When both services are updated, update n8n first and OpenWebUI second. The n8n compose configuration declares a shared network as external, owned by the OpenWebUI compose project; updating OpenWebUI first removes that network, and the n8n update then fails to start its containers. Updating n8n first keeps the network present, and the OpenWebUI update re-attaches n8n to the shared network afterwards."
+    },
+    {
+      "locator": "update/steps",
+      "text": "Update n8n by running the operator's update procedure from the n8n compose project directory: pull the pinned n8n image, stop the running containers, rebuild, and restart. Every update causes temporary downtime for all n8n workflows until the containers are back."
+    },
+    {
+      "locator": "update/tag-pin",
+      "text": "Verify that the image tag pulled by the update matches the tag pinned in the n8n compose file. A tag mismatch silently no-ops the update: the container keeps running the old image while the update appears to succeed. If an update appears to do nothing, compare the pulled tag against the compose pin first."
+    },
+    {
+      "locator": "update/verify-health",
+      "text": "After the update, verify n8n health with the supported wget-based check. The n8n image no longer includes curl, so a healthcheck written against curl fails even when n8n is running fine; treat a curl-based failure as a false alarm and re-check with wget."
+    },
+    {
+      "locator": "update/verify-connectivity",
+      "text": "After either service's update, verify n8n-to-Ollama connectivity: confirm the n8n container is attached both to its own compose network and to the OpenWebUI compose network, then request the Ollama API version from inside the n8n container over the OpenWebUI service endpoint, for example docker exec n8n sh -lc 'wget -qO- http://open-webui:11434/api/version', which must return a JSON version response. The link is load-bearing for the Ollama-backed n8n workflows."
+    }
+  ],
+  "verification": {
+    "verifier": "agent-tribunal review (delegated by alan, 2026-09-29)",
+    "verified_at": "2026-09-29T09:20:57.282068+00:00",
+    "applicability": "operators running n8n and OpenWebUI via docker compose on a single host"
+  },
+  "content_hash": "1ee52352aea16323e97b7df775a8bf1a77ca2588210ab2eec506a563709ea16e"
+}

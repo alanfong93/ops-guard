@@ -1,0 +1,42 @@
+{
+  "runbook_id": "openwebui-update",
+  "revision": "2026-09-29.1",
+  "operation": {
+    "action": "update",
+    "target": "openwebui"
+  },
+  "preconditions": [
+    {
+      "name": "docker-engine",
+      "expected": "running"
+    }
+  ],
+  "passages": [
+    {
+      "locator": "update/ordering",
+      "text": "When both services are updated, update n8n first and this OpenWebUI stack second. The OpenWebUI compose project owns the shared external network that the n8n compose configuration depends on; updating OpenWebUI first removes that network, so the n8n update cannot start. The OpenWebUI update procedure therefore closes by re-attaching n8n to the shared network, restoring the n8n-to-Ollama link that its project teardown dropped."
+    },
+    {
+      "locator": "update/steps",
+      "text": "Update OpenWebUI by running the operator's update procedure from the OpenWebUI compose project directory: pull the latest open-webui:ollama base image, stop the running containers, rebuild the custom image, and restart. Every update causes temporary downtime for the local OpenWebUI instance and the Ollama-backed workloads."
+    },
+    {
+      "locator": "update/no-cache-rebuild",
+      "text": "The running image is a local build layered on the open-webui:ollama base image with the current Ollama binary, so the rebuild must run with no cache. The no-cache rebuild re-downloads the Ollama release and can fail transiently; the update procedure fails fast and leaves the previous image running rather than starting a stale build, so a thrown error means retry later, not a broken install."
+    },
+    {
+      "locator": "update/ollama-version",
+      "text": "An OpenWebUI update usually updates Ollama, not OpenWebUI: the layered Ollama release often changes while the base image has no new release. OpenWebUI reporting the same version after an update is expected, not a failure. Verify both versions after updating: the Ollama version with docker exec open-webui ollama --version, and the packaged OpenWebUI version from the container's package manifest. Models live in an external volume and survive the rebuild; list the installed models afterwards to confirm the inventory."
+    },
+    {
+      "locator": "update/verify-connectivity",
+      "text": "After either service's update, verify n8n-to-Ollama connectivity: confirm the n8n container is attached both to its own compose network and to the OpenWebUI compose network, then request the Ollama API version from inside the n8n container over the OpenWebUI service endpoint, for example docker exec n8n sh -lc 'wget -qO- http://open-webui:11434/api/version', which must return a JSON version response. The link is load-bearing for the Ollama-backed n8n workflows."
+    }
+  ],
+  "verification": {
+    "verifier": "agent-tribunal review (delegated by alan, 2026-09-29)",
+    "verified_at": "2026-09-29T09:20:57.282068+00:00",
+    "applicability": "operators running n8n and OpenWebUI via docker compose on a single host"
+  },
+  "content_hash": "14a3c5bca2779ee916c3a7442f3080338487b809c2da585f84ef7471bbdb5c92"
+}

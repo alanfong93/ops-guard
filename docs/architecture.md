@@ -14,12 +14,23 @@ C4Context
     System_Ext(systems, "Managed systems", "Self-hosted production systems reached only through approved ops-guard operations.")
 
     Rel(operator, host, "Directs operational work")
-    Rel(host, guard, "Uses MCP")
+    Rel(host, guard, "Uses MCP over LAN HTTPS: bearer token, TLS, Host/Origin allowlists")
     Rel(guard, runbooks, "Retrieves cited procedures")
     Rel(guard, approval, "Verifies proposal-bound approval")
     Rel(guard, audit, "Records requests and outcomes")
     Rel(guard, systems, "Executes gated operations")
 ```
+
+The deployment boundary for the running service is `python -m ops_guard`
+([ADR 0006](adr/0006-lan-mcp-transport.md)): FastMCP Streamable HTTP with
+native Uvicorn TLS on the configured LAN interface, a static high-entropy
+bearer token compared in constant time, explicit Host/Origin allowlists,
+and fail-closed startup over the environment contract, runbook directory,
+certificate pair, and crash reconciliation. The bearer token is transport
+authentication, not authorization; it never substitutes for standing
+authorization or proposal-bound approval. The LAN listener carries only the
+retrieval tool; proposal, judge, approval, and execution surfaces arrive in
+later stages.
 
 The audit record is append-only operational history. It is not a tamper-evident ledger and does not itself protect against storage-level deletion; deployments needing that assurance must retain audit records independently.
 

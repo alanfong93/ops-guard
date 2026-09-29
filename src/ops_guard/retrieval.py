@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import AuthProvider
 from pydantic import Field
 
 from ops_guard.audit import AuditWriteFailure
@@ -210,14 +211,19 @@ def _result_to_dict(result: SearchResult) -> dict:
     }
 
 
-def build_mcp_server(library: RunbookLibrary, audit: "AuditLog") -> FastMCP:
+def build_mcp_server(
+    library: RunbookLibrary,
+    audit: "AuditLog",
+    auth: "AuthProvider | None" = None,
+) -> FastMCP:
     """MCP server exposing ``search_runbook`` — no other surface.
 
     ``audit`` is required (issue #40): every valid search records correlated
     ``request`` and ``guidance`` events atomically before results are
-    returned, fail-closed on recording failure.
+    returned, fail-closed on recording failure. ``auth`` optionally attaches
+    a FastMCP auth provider (issue #54 wires a static bearer verifier).
     """
-    server: FastMCP = FastMCP("ops-guard-retrieval")
+    server: FastMCP = FastMCP("ops-guard-retrieval", auth=auth)
 
     @server.tool
     def search_runbook(

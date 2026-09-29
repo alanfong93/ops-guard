@@ -57,3 +57,9 @@ event for every failed check.
 - If the audit store dies after dispatch, the outcome record cannot be
   written (the execution-start record is durable; the gap is documented in
   the gate).
+- The demonstration drives the components in-process. The LAN transport
+  boundary (`python -m ops_guard`, ADR 0006) is demonstrated separately by
+  the service's real-socket suite; it exposes only `search_runbook` — the
+  propose/approve/execute paths above do not cross the network yet, and the
+  script-identity verification residual stays with the execution
+  integration (issue #64).

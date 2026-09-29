@@ -314,3 +314,66 @@ def test_judge_outcome_never_blocks_issuance(tmp_path_factory, junk: str) -> Non
         )
         assert issued.token
         assert issued.proposal_id
+
+def test_model_digest_available_path_records_resolved_marker() -> None:
+    class ShowTransport(FakeTransport):
+        def post(self, path, payload, timeout_ms):
+            if path.endswith("/api/show"):
+                self.posts.append({"path": path, "payload": payload, "timeout_ms": timeout_ms})
+                return type(
+                    "R",
+                    (),
+                    {
+                        "status_code": 200,
+                        "body": json.dumps({"digest": "sha256:abcd1234"}),
+                    },
+                )()
+            return super().post(path, payload, timeout_ms)
+
+    transport = ShowTransport(outputs=['"routine"'] * 3)
+    judge = make_judge(transport)
+    projection = judge.evaluate_risk(sample_state())
+    assert projection["model_digest"] == "sha256:abcd1234"
+    assert projection["model_digest_status"] == "resolved"
+
+
+def test_non_string_digest_falls_back_to_unavailable() -> None:
+    class BadShowTransport(FakeTransport):
+        def post(self, path, payload, timeout_ms):
+            if path.endswith("/api/show"):
+                return type(
+                    "R", (), {"status_code": 200, "body": json.dumps({"digest": ["nope"]})}
+                )()
+            return super().post(path, payload, timeout_ms)
+
+    judge = make_judge(BadShowTransport(outputs=['"routine"'] * 3))
+    projection = judge.evaluate_risk(sample_state())
+    assert projection["model_digest"] is None
+    assert projection["model_digest_status"] == "unavailable"
+
+
+def test_orchestrator_failure_becomes_closed_judge_error(tmp_path, monkeypatch) -> None:
+    transport = FakeTransport(outputs=['"routine"'] * 3)
+    judge = make_judge(transport, fingerprint=lambda value: "fp")
+    import ops_guard.judge as judge_module
+
+    def exploding(self, envelope, question_id, question):
+        raise RuntimeError("internal explosion")
+
+    monkeypatch.setattr(judge_module.SamplingOrchestrator, "run_question", exploding)
+    projection = judge.evaluate_risk(sample_state())
+    assert projection["status"] == "judge_error"
+    assert projection["trace_id"] is None
+    assert set(projection) <= ALLOWED_PROJECTION_FIELDS
+
+
+def test_fingerprint_binds_state_and_question_id() -> None:
+    transport = FakeTransport(
+        outputs=['"routine"', '"routine"', '"routine"', '"critical"', '"critical"', '"critical"']
+    )
+    judge = make_judge(transport, fingerprint=lambda value: "fp-" + value["question_id"])
+    state = sample_state()
+    results = judge.evaluate_question_map(state, ["q1", "q2"])
+    assert results["q1"]["request_fingerprint"] != results["q2"]["request_fingerprint"]
+    again = judge.evaluate_question_map(state, ["q1", "q2"])
+    assert again["q1"]["request_fingerprint"] == results["q1"]["request_fingerprint"]

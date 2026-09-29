@@ -179,7 +179,6 @@ class LocalJudge:
         answered/terminal/inability outcomes onto the closed failure codes.
         This method never raises: the worst case is a typed failure.
         """
-        fingerprint = self._fingerprint(state) if self._fingerprint is not None else None
         try:
             envelopes = {
                 question_id: self._validator.parse(_compose_state(state, question_id))
@@ -191,18 +190,35 @@ class LocalJudge:
                     status="judge_input_rejected",
                     question_id=question_id,
                     trace_id=None,
-                    fingerprint=fingerprint,
+                    fingerprint=self._fingerprint_of(state, question_id),
                     state=state,
                 )
                 for question_id in question_ids
             }
         results: dict[str, dict] = {}
         for question_id, resolved in envelopes.items():
-            entry = self._run_one(resolved, question_id)
+            try:
+                entry = self._run_one(resolved, question_id)
+            except Exception:  # noqa: BLE001 — the worst case is a typed failure
+                results[question_id] = self._projection(
+                    status="judge_error",
+                    question_id=question_id,
+                    trace_id=None,
+                    fingerprint=self._fingerprint_of(state, question_id),
+                    state=state,
+                )
+                continue
             results[question_id] = self._project_entry(
-                entry, question_id, fingerprint, state
+                entry, question_id, self._fingerprint_of(state, question_id), state
             )
         return results
+
+    def _fingerprint_of(self, state: Mapping[str, Any], question_id: str) -> str | None:
+        """Keyed fingerprint of the exact judge request: the composed state
+        plus the question it was asked under (ADR 0009)."""
+        if self._fingerprint is None:
+            return None
+        return self._fingerprint({"state": state, "question_id": question_id})
 
     @staticmethod
     def _citation_refs_of(state: Mapping[str, Any]) -> list[str]:

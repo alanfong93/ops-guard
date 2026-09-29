@@ -98,6 +98,7 @@ class ServiceHandle:
             tls_keyfile=key_path,
             allowed_hosts=allowed_hosts,
             allowed_origins=("https://ops-guard.lan",),
+            proposal_ttl_seconds=900,
         )
         self._thread: threading.Thread | None = None
         self._server: uvicorn.Server | None = None
@@ -181,7 +182,8 @@ def test_valid_client_discovers_only_search_runbook_and_retrieves_the_expected_c
         return [tool.name for tool in tools], json.loads(result.content[0].text)
 
     tool_names, payload = asyncio.run(scenario())
-    assert tool_names == ["search_runbook"]
+    # S7-1 (issue #57): the proposal tool joins the same authenticated server.
+    assert sorted(tool_names) == ["propose_fix", "search_runbook"]
     assert payload, "expected at least one cited result"
     top = payload[0]
     with open(N8N_RUNBOOK, encoding="utf-8") as handle:
@@ -298,6 +300,7 @@ def test_unusable_database_path_fails_startup_as_typed_error(tmp_path) -> None:
         tls_keyfile=key_path,
         allowed_hosts=("localhost",),
         allowed_origins=("https://ops-guard.lan",),
+        proposal_ttl_seconds=900,
     )
     with pytest.raises(StartupError) as raised:
         build_http_server(config)

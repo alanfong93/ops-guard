@@ -56,6 +56,74 @@ implementation: `src/ops_guard/retrieval.py`.
 
 No execution, authorization, or judgment is exposed through this tool.
 
+### `propose_fix`
+
+Freeze a host-composed operation into an audited proposal with a one-time
+token. Contract: [ADR 0008](adr/0008-host-composed-proposal-mcp-contract.md);
+implementation: `src/ops_guard/proposal_tool.py`. The request has exactly two
+top-level inputs; extra fields are rejected.
+
+- **Input**
+  - `invocation` (object, required) — the complete structured invocation:
+    - `action` (string), `target` (string)
+    - `arguments` (object, JSON mapping)
+    - `preconditions` (array of `{name, expected}` objects, order significant)
+    - `runbook_revision_hash` (string)
+  - `citation` (object, required) — evidence reference:
+    - `runbook_id` (string), `revision` (string)
+    - `content_hash` (string), `locator` (string)
+
+  No free-text problem, `ttl`, approval, standing authorization, observed
+  preconditions, script path/bytes, executor, or operator identity is
+  accepted at any nesting level.
+
+- **Validation, before any proposal exists** — the server resolves the
+  citation through its configured verified `RunbookLibrary` (never a
+  caller-supplied document) and requires: the citation resolves to a
+  verified revision; `invocation.runbook_revision_hash` equals its
+  `content_hash`; `action` and `target` equal the cited revision's
+  operation; the full ordered precondition sequence canonically equals the
+  cited revision's preconditions. A citation may name any verified
+  immutable revision in the configured library; there is no
+  "latest revision" concept.
+
+- **Result** — the `IssuedProposal` shape on success:
+  - `proposal_id` (string)
+  - `invocation_digest` (string) — SHA-256 of the frozen canonical invocation
+  - `expires_at` (string, timezone-aware ISO-8601) — computed by the
+    proposal service's clock from the server-configured TTL (15 minutes by
+    default; `OPS_GUARD_PROPOSAL_TTL_SECONDS` operator override; never
+    caller-controlled)
+  - `token` (string) — the raw one-time execution token, revealed in this
+    response only; never stored or logged (proposals store an HMAC digest)
+
+  Repeated valid calls create distinct proposals; there is no request
+  idempotency key, so clients must not retry blindly after an ambiguous
+  response.
+
+- **Typed errors** (stable codes prefix the message; text contains no token
+  or secret values; every failure happens before `open_proposal` except
+  `proposal_write_failed`):
+  - `invalid_invocation` — the invocation is not a well-formed complete
+    invocation (shape, types, non-serializable values).
+  - `invalid_citation` — malformed, unverified, tampered, or unknown-locator
+    citation; the citation does not resolve to a verified revision.
+  - `invocation_evidence_mismatch` — the invocation's revision hash, action,
+    target, or ordered preconditions differ from the resolved evidence.
+  - `proposal_write_failed` — proposal persistence or its audit append
+    failed; no proposal row, event, or token exists.
+
+- **Evidence provenance** — the proposal audit event records the
+  proposal-time citation (`runbook_id@revision`, `content_hash`, `locator`)
+  as its `evidence_refs` in the same insert transaction. This is provenance
+  only: it is not part of the frozen invocation digest, not an approval
+  binding, and never an authorization input. At execution the gate
+  independently re-resolves the citation actually used against the same
+  frozen revision/action/target/preconditions and audits it; a different
+  valid locator in the same revision is provenance, not an authorization
+  failure. Comparing the proposal and execution audit references makes any
+  locator difference visible.
+
 ### Search recording
 
 For every valid `search_runbook` call, before any result is returned, two

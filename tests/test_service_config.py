@@ -145,6 +145,31 @@ def test_port_must_be_in_range() -> None:
             load_config(environ)
 
 
+def test_proposal_ttl_defaults_to_900_seconds_when_absent() -> None:
+    from ops_guard.service import load_config
+
+    assert load_config(REQUIRED_VARS).proposal_ttl_seconds == 900
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "abc", "8443.0", "0", "-5", "900.5"])
+def test_invalid_proposal_ttl_override_fails_startup(bad: str) -> None:
+    from ops_guard.service import load_config
+
+    environ = dict(REQUIRED_VARS)
+    environ["OPS_GUARD_PROPOSAL_TTL_SECONDS"] = bad
+    with pytest.raises(ConfigurationError) as raised:
+        load_config(environ)
+    assert "OPS_GUARD_PROPOSAL_TTL_SECONDS" in str(raised.value)
+
+
+def test_valid_proposal_ttl_override_is_parsed() -> None:
+    from ops_guard.service import load_config
+
+    environ = dict(REQUIRED_VARS)
+    environ["OPS_GUARD_PROPOSAL_TTL_SECONDS"] = "60"
+    assert load_config(environ).proposal_ttl_seconds == 60
+
+
 def test_allowlist_parsing_drops_empties_and_strips_whitespace() -> None:
     assert parse_allowlist(" ops-guard.lan , , localhost ,,", variable="V") == ("ops-guard.lan", "localhost")
 

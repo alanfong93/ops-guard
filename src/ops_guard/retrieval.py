@@ -22,7 +22,7 @@ import sqlite3
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from fastmcp import FastMCP
@@ -215,15 +215,27 @@ def build_mcp_server(
     library: RunbookLibrary,
     audit: "AuditLog",
     auth: "AuthProvider | None" = None,
+    proposals: "ProposalService | None" = None,
+    proposal_ttl: "timedelta | None" = None,
 ) -> FastMCP:
-    """MCP server exposing ``search_runbook`` — no other surface.
+    """MCP server exposing ``search_runbook`` — and, when a proposal service
+    is wired (issue #57), ``propose_fix``.
 
     ``audit`` is required (issue #40): every valid search records correlated
     ``request`` and ``guidance`` events atomically before results are
     returned, fail-closed on recording failure. ``auth`` optionally attaches
     a FastMCP auth provider (issue #54 wires a static bearer verifier).
+    ``proposals``/``proposal_ttl`` add the host-composed proposal tool on
+    this same server and database — never a second server or store.
     """
     server: FastMCP = FastMCP("ops-guard-retrieval", auth=auth)
+
+    if proposals is not None:
+        from ops_guard.proposal_tool import register_propose_fix
+
+        if proposal_ttl is None:
+            proposal_ttl = timedelta(minutes=15)
+        register_propose_fix(server, library=library, proposals=proposals, ttl=proposal_ttl)
 
     @server.tool
     def search_runbook(

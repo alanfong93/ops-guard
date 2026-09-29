@@ -131,6 +131,10 @@ against a no-relevance baseline. See [docs/retrieval-evaluation.md](docs/retriev
 failures categorized). These numbers measure citation correctness only —
 not operational safety.
 
+## Runbook corpus
+
+[`runbooks/`](runbooks/) holds the public starter corpus: scrubbed n8n and OpenWebUI update procedures with their evidence passages, preconditions, verification metadata, and content hashes (see [docs/runbook-format.md](docs/runbook-format.md)). Procedure prose only — each operator supplies and authorizes their own executable script bytes, paths, and standing authorizations privately; a public runbook never pre-authorizes a script ([ADR 0007](docs/adr/0007-public-runbooks-operator-local-scripts.md)). No license is chosen and no downstream reuse right is implied.
+
 ## Demonstrated behavior
 
 The permitted and refused execution paths — standing authorization,

@@ -32,5 +32,11 @@
       "locator": "update/verify-connectivity",
       "text": "After either service's update, verify n8n-to-Ollama connectivity: confirm the n8n container is attached both to its own compose network and to the OpenWebUI compose network, then request the Ollama API version from inside the n8n container over the OpenWebUI service endpoint, for example docker exec n8n sh -lc 'wget -qO- http://open-webui:11434/api/version', which must return a JSON version response. The link is load-bearing for the Ollama-backed n8n workflows."
     }
-  ]
+  ],
+  "verification": {
+    "verifier": "agent-tribunal review (delegated by alan, 2026-09-29)",
+    "verified_at": "2026-09-29T09:20:57.282068+00:00",
+    "applicability": "operators running n8n and OpenWebUI via docker compose on a single host"
+  },
+  "content_hash": "1ee52352aea16323e97b7df775a8bf1a77ca2588210ab2eec506a563709ea16e"
 }

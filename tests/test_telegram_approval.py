@@ -630,3 +630,35 @@ def test_notifier_survives_transient_storage_errors(tmp_path) -> None:
     notifier.active_unapproved = flaky
     assert notifier.scan_once() == []  # survived the storage error
     assert notifier.scan_once() == [harness.service.store and notifier.active_unapproved()[0].proposal_id]
+
+def test_notifier_survives_storage_error_during_deliver(tmp_path) -> None:
+    """audit.events() failure inside deliver() must not kill the loop."""
+    harness = Harness(tmp_path)
+    from ops_guard.invocation import Invocation
+
+    harness.service.open_proposal(
+        Invocation(
+            action="restart",
+            target="n8n",
+            arguments={},
+            preconditions=[],
+            runbook_revision_hash="b" * 64,
+        ),
+        ttl=timedelta(minutes=15),
+    )
+    notifier = make_notifier(harness)
+    slept = []
+    notifier._stop.wait = slept.append
+    state = {"fail": True}
+    real_events = harness.audit.events
+
+    def flaky_events():
+        if state["fail"]:
+            state["fail"] = False
+            raise sqlite3.OperationalError("audit read failed")
+        return real_events()
+
+    harness.audit.events = flaky_events
+    assert notifier.scan_once() == []  # survived the deliver-level storage error
+    delivered = notifier.scan_once()
+    assert delivered  # recovered and delivered on the next scan

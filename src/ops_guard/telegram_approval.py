@@ -85,7 +85,7 @@ def load_approval_config(environ: Mapping[str, str]) -> ApprovalConfig | None:
         return value
 
     bot_token = required("OPS_GUARD_TELEGRAM_BOT_TOKEN")
-    if not re.fullmatch(r"[0-9]{6,12}:[A-Za-z0-9_-]{20,}", bot_token):
+    if not re.fullmatch(r"[0-9]{6,20}:[A-Za-z0-9_-]{20,}", bot_token):
         raise ApprovalConfigError(
             "OPS_GUARD_TELEGRAM_BOT_TOKEN is malformed (expected <bot id>:<secret>)"
         )
@@ -346,6 +346,10 @@ class ApprovalNotifier:
                 self._sleep(error.retry_after)
                 continue
             except TelegramTransportError:
+                self._sleep(min(5.0, self._backoff_cap))
+                continue
+            except sqlite3.Error:
+                # evidence read or other storage failure: transient, survive
                 self._sleep(min(5.0, self._backoff_cap))
                 continue
             except ValueError:

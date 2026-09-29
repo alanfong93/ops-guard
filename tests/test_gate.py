@@ -31,6 +31,7 @@ from ops_guard import (
 from ops_guard.retrieval import RunbookLibrary
 from helpers import make_invocation
 from tests_helpers_runbook import VALID_RUNBOOK
+from helpers import make_observer_registry, make_policy_document, load_test_policy
 
 OPERATOR = "alan"
 SCRIPT_PATH = "/opt/scripts/restart-n8n.sh"
@@ -65,9 +66,6 @@ def make_request(**overrides) -> ExecutionRequest:
         token="token-placeholder",
         script_path=SCRIPT_PATH,
         citation=citation(),
-        observed_preconditions={"healthcheck": "passing"},
-        operator_identity=OPERATOR,
-        standing=base_authorization(),
         expected_digest=None,
     )
     fields.update(overrides)
@@ -89,6 +87,8 @@ class Harness:
         )
         self.library, _rejections = RunbookLibrary.load([VALID_RUNBOOK])
         self.scripts: dict[str, bytes] = {SCRIPT_PATH: SCRIPT_BYTES}
+        self.registry = make_observer_registry({"static_test": "passing"})
+        self.rebuild_policy()
         self.gate = ExecutionGate(
             self.service,
             self.verifier,
@@ -96,6 +96,9 @@ class Harness:
             runbooks=self.library,
             script_source=self.scripts.__getitem__,
             clock=clock,
+            observer_registry=self.registry,
+            authorization_catalog=self.policy,
+            operator_identity=OPERATOR,
         )
         self.executor_calls: list[tuple[Invocation, bytes]] = []
 
@@ -104,6 +107,45 @@ class Harness:
         invocation = make_invocation(**overrides)
         issued = self.service.open_proposal(invocation, ttl=timedelta(minutes=10))
         return issued
+
+    def rebuild_policy(self, *, with_standing: bool = True, extra_standing=(), bindings: bool = True) -> None:
+        """Rebuild the operator catalog. Default: the exact restart
+        authorization is present, so matching invocations dispatch via the
+        standing path (the old request default). ``with_standing=False``
+        yields an approval-only catalog."""
+        standing = ([base_authorization()] if with_standing else []) + list(extra_standing)
+        self.policy = load_test_policy(
+            make_policy_document(
+                runbook_id=VALID_RUNBOOK["runbook_id"],
+                revision=VALID_RUNBOOK["revision"],
+                content_hash=VALID_RUNBOOK["content_hash"],
+                standing=standing,
+                bindings=bindings,
+            ),
+            self.registry,
+        )
+        self.gate = ExecutionGate(
+            self.service,
+            self.verifier,
+            self.audit,
+            runbooks=self.library,
+            script_source=self.scripts.__getitem__,
+            clock=self.clock,
+            observer_registry=self.registry,
+            authorization_catalog=self.policy,
+            operator_identity=OPERATOR,
+        )
+        self.gate = ExecutionGate(
+            self.service,
+            self.verifier,
+            self.audit,
+            runbooks=self.library,
+            script_source=self.scripts.__getitem__,
+            clock=self.clock,
+            observer_registry=self.registry,
+            authorization_catalog=self.policy,
+            operator_identity=OPERATOR,
+        )
 
     def rebuild_library(self, documents: list[dict]) -> None:
         """Swap the verified library and rewire the gate to it."""
@@ -115,6 +157,9 @@ class Harness:
             runbooks=self.library,
             script_source=self.scripts.__getitem__,
             clock=self.clock,
+            observer_registry=self.registry,
+            authorization_catalog=self.policy,
+            operator_identity=OPERATOR,
         )
 
     def executor(self, invocation: Invocation, script_bytes: bytes) -> str:
@@ -186,6 +231,16 @@ def test_gate_rejects_split_audit_store_before_any_dispatch(tmp_path, token_key,
             runbooks=RunbookLibrary.load([VALID_RUNBOOK])[0],
             script_source=lambda p: SCRIPT_BYTES,
             clock=clock,
+            observer_registry=make_observer_registry(),
+            authorization_catalog=load_test_policy(
+                make_policy_document(
+                    runbook_id=VALID_RUNBOOK["runbook_id"],
+                    revision=VALID_RUNBOOK["revision"],
+                    content_hash=VALID_RUNBOOK["content_hash"],
+                ),
+                make_observer_registry(),
+            ),
+            operator_identity=OPERATOR,
         )
 
     # The mismatched configuration never reached dispatch: the executor did
@@ -215,9 +270,10 @@ def test_gate_on_one_shared_database_dispatches_atomically(tmp_path, token_key, 
 
 def test_successful_approval_dispatch_spends_the_approval(harness: Harness) -> None:
     issued = harness.issue()
+    harness.rebuild_policy(with_standing=False)
     harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
     request = make_request(
-        token=issued.token, standing=None, expected_digest=issued.invocation_digest
+        token=issued.token, expected_digest=issued.invocation_digest
     )
     outcome = harness.gate.execute(request, harness.executor)
     assert outcome.dispatched and outcome.authorization_path == "proposal-bound"
@@ -349,12 +405,13 @@ def test_ordinary_exception_stays_failure_and_persists_no_exception_text(harness
 )
 def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harness) -> None:
     issued = harness.issue()
-    if mutation != "forged-script-bytes":
-        # The forged case must not fall back to the approval path: it exists
-        # to pin that a standing match against resolved bytes fails closed.
+    if mutation not in ("forged-script-bytes", "script-unresolvable"):
+        # The forged and unresolvable cases must not fall back to the
+        # approval path: they pin that a standing match against resolved
+        # bytes fails closed.
         harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
 
-    overrides: dict = {"token": issued.token, "standing": None}
+    overrides: dict = {"token": issued.token}
     if mutation == "absent-evidence":
         # A well-formed citation whose revision the library never verified.
         overrides["citation"] = Citation(
@@ -371,8 +428,10 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
             locator="nope",
         )
     elif mutation == "evidence-operation-mismatch":
-        overrides["standing"] = base_authorization()
-        overrides["standing"] = parse_authorization({
+        # the destroy invocation matches no catalog authorization; the
+        # recorded proposal-bound approval authorizes the dispatch refusal
+        # path instead (the evidence check refuses before authorization).
+        parse_authorization({
             "authorization_id": "other",
             "script_path": SCRIPT_PATH,
             "script_sha256": SCRIPT_SHA256,
@@ -386,9 +445,22 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
         overrides["token"] = harness_issue.token
         harness.verifier.record_approval(harness_issue.token, operator_identity=OPERATOR)
     elif mutation == "missing-observation":
-        overrides["observed_preconditions"] = {}
+        # the revision's precondition has no observer binding: fail closed
+        harness.rebuild_policy(with_standing=False, bindings=False)
+        harness.gate = ExecutionGate(
+            harness.service,
+            harness.verifier,
+            harness.audit,
+            runbooks=harness.library,
+            script_source=harness.scripts.__getitem__,
+            clock=harness.clock,
+            observer_registry=harness.registry,
+            authorization_catalog=harness.policy,
+            operator_identity=OPERATOR,
+        )
     elif mutation == "wrong-observation":
-        overrides["observed_preconditions"] = {"healthcheck": "failing"}
+        # the operator's own observer reports the wrong state
+        harness.registry._test_state["value"] = "failing"
     elif mutation == "unknown-token":
         overrides["token"] = "never-issued"
     elif mutation == "expired-token":
@@ -396,9 +468,10 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
     elif mutation == "consumed-token":
         harness.service.consume(issued.token)
     elif mutation == "no-standing-no-approval":
+        # approval-only catalog and no recorded approval: nothing authorizes
+        harness.rebuild_policy(with_standing=False)
         plain = harness.issue()
         overrides["token"] = plain.token
-        overrides["standing"] = None
     elif mutation == "approval-replay":
         harness.service.consume(issued.token, same_transaction=harness.verifier.mark_used_append(issued.token))
         second = harness.issue()
@@ -407,14 +480,17 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
         # spend the second approval, then present the spent token again below
         harness.service.consume(second.token)
         overrides["token"] = issued.token
-        overrides["standing"] = None
     elif mutation == "host-supplied-approval":
+        harness.rebuild_policy(with_standing=False)
         plain = harness.issue()
         overrides["token"] = plain.token
-        overrides["standing"] = None
     elif mutation == "wrong-operator":
-        overrides["operator_identity"] = "mallory"
-        overrides["standing"] = None
+        # a caller can no longer name an operator identity: the gate uses
+        # the configured one. With an approval-only catalog and no approval
+        # recorded, nothing authorizes — the original refusal stands.
+        harness.rebuild_policy(with_standing=False)
+        plain = harness.issue()
+        overrides["token"] = plain.token
     elif mutation == "audit-failure":
         original_append_on = harness.audit.append_on
 
@@ -429,6 +505,7 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
     elif mutation == "different-revision-evidence":
         # A different, fully valid, human-verified revision - same operation,
         # different content. The proposal froze the original revision's hash.
+        harness.rebuild_policy(with_standing=False)
         import hashlib
 
         from ops_guard.invocation import canonicalize_json
@@ -445,16 +522,14 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
             content_hash=other["content_hash"],
             locator="restart/steps",
         )
-        overrides["standing"] = base_authorization()
     elif mutation == "script-unresolvable":
+        harness.rebuild_policy(with_standing=False)
         overrides["script_path"] = "/opt/scripts/never-there.sh"
-        overrides["standing"] = base_authorization()
     elif mutation == "forged-script-bytes":
-        # The authorization binds the real bytes; the authoritative source
-        # serves different ones. The gate must match against the bytes it
-        # resolved — and refuse — never against a caller-supplied digest.
+        # The catalog authorization binds the real bytes; the authoritative
+        # source serves different ones. The gate must match against the bytes
+        # it resolved — and refuse — never against a caller-supplied digest.
         harness.scripts[SCRIPT_PATH] = SCRIPT_BYTES + b"# tampered after authorization\n"
-        overrides["standing"] = base_authorization()
 
     outcome = harness.gate.execute(make_request(**overrides), harness.executor)
 
@@ -470,7 +545,8 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
 
 def test_refusals_are_audit_recorded_before_any_side_effect(harness: Harness) -> None:
     issued = harness.issue()
-    outcome = harness.gate.execute(make_request(token=issued.token, standing=None), harness.executor)
+    harness.rebuild_policy(with_standing=False)
+    outcome = harness.gate.execute(make_request(token=issued.token), harness.executor)
     assert not outcome.dispatched
     refusals = [e for e in harness.audit.events() if e.event_type == "refusal"]
     assert refusals, "refusal must be audit-recorded"
@@ -500,8 +576,9 @@ def test_standing_mismatch_falls_back_to_approval(harness: Harness) -> None:
         "preconditions": [{"name": "healthcheck", "expected": "passing"}],
         "runbook_revision_hash": VALID_RUNBOOK["content_hash"],
     })
+    harness.rebuild_policy(with_standing=False, extra_standing=[mismatched])
     outcome = harness.gate.execute(
-        make_request(token=issued.token, standing=mismatched), harness.executor
+        make_request(token=issued.token), harness.executor
     )
     assert outcome.dispatched and outcome.authorization_path == "proposal-bound"
     start = [e for e in harness.audit.events() if e.event_type == "execution_start"]
@@ -567,6 +644,7 @@ def test_refusal_append_failure_escapes_fail_closed(harness: Harness) -> None:
     """Documented window: if the refusal append itself cannot persist, the
     AuditWriteFailure escapes (fail-closed) — the executor never runs."""
     issued = harness.issue()
+    harness.rebuild_policy(with_standing=False)
     original_append_on = harness.audit.append_on
 
     def failing_append_on(conn, event_type, **kwargs):
@@ -576,7 +654,7 @@ def test_refusal_append_failure_escapes_fail_closed(harness: Harness) -> None:
 
     harness.audit.append_on = failing_append_on  # type: ignore[method-assign]
     with pytest.raises(AuditWriteFailure):
-        harness.gate.execute(make_request(token=issued.token, standing=None), harness.executor)
+        harness.gate.execute(make_request(token=issued.token), harness.executor)
     assert harness.executor_calls == []
     frozen = harness.service.resolve(issued.token)
     assert not frozen.consumed
@@ -641,10 +719,9 @@ def test_citation_never_resolves_without_a_verified_library_revision(
     corrupt=st.sampled_from(
         ["none", "script-bytes", "script-path", "revision-hash", "observation"]
     ),
-    via_standing=st.booleans(),
 )
 @settings(max_examples=25, deadline=None)
-def test_only_exact_resolved_artifacts_dispatch(corrupt: str, via_standing: bool) -> None:
+def test_only_exact_resolved_artifacts_dispatch(corrupt: str) -> None:
     """Authorization-boundary property (issue #34): any mismatch between the
     caller's presentation and the gate-resolved artifacts refuses before
     consumption or execution; only the exact resolution dispatches."""
@@ -660,6 +737,16 @@ def test_only_exact_resolved_artifacts_dispatch(corrupt: str, via_standing: bool
     )
     library, _ = RunbookLibrary.load([VALID_RUNBOOK])
     scripts: dict[str, bytes] = {SCRIPT_PATH: SCRIPT_BYTES}
+    registry = make_observer_registry({"static_test": "passing"})
+    policy = load_test_policy(
+        make_policy_document(
+            runbook_id=VALID_RUNBOOK["runbook_id"],
+            revision=VALID_RUNBOOK["revision"],
+            content_hash=VALID_RUNBOOK["content_hash"],
+            standing=[base_authorization()],
+        ),
+        registry,
+    )
     gate = ExecutionGate(
         service,
         verifier,
@@ -667,17 +754,14 @@ def test_only_exact_resolved_artifacts_dispatch(corrupt: str, via_standing: bool
         runbooks=library,
         script_source=scripts.__getitem__,
         clock=clock,
+        observer_registry=registry,
+        authorization_catalog=policy,
+        operator_identity=OPERATOR,
     )
 
-    overrides: dict = {"standing": base_authorization() if via_standing else None}
+    overrides: dict = {}
     if corrupt == "script-bytes":
         scripts[SCRIPT_PATH] = SCRIPT_BYTES + b"# malicious appendage\n"
-        if via_standing:
-            pass  # the standing match must refuse on the resolved digest
-        else:
-            # proposal-bound: dispatch proceeds, but on the resolved bytes —
-            # the provenance record is the gate's own digest.
-            pass
     elif corrupt == "script-path":
         overrides["script_path"] = "/opt/scripts/never-there.sh"
     elif corrupt == "revision-hash":
@@ -688,13 +772,15 @@ def test_only_exact_resolved_artifacts_dispatch(corrupt: str, via_standing: bool
             locator="restart/steps",
         )
     elif corrupt == "observation":
-        overrides["observed_preconditions"] = {"healthcheck": "failing"}
+        # the operator's own observer reports the wrong state: refusal
+        registry._test_state["value"] = "failing"
 
     invocation = make_invocation(runbook_revision_hash=VALID_RUNBOOK["content_hash"])
     issued = service.open_proposal(invocation, ttl=timedelta(minutes=10))
     overrides["token"] = issued.token
-    if not via_standing:
-        verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    # every corrupt case records the proposal-bound approval: script-bytes
+    # falls back to it after the standing match refuses the resolved digest
+    verifier.record_approval(issued.token, operator_identity=OPERATOR)
 
     calls: list[bytes] = []
 
@@ -707,9 +793,10 @@ def test_only_exact_resolved_artifacts_dispatch(corrupt: str, via_standing: bool
     if corrupt == "none":
         assert outcome.dispatched
         assert calls == [SCRIPT_BYTES]
-    elif corrupt == "script-bytes" and not via_standing:
-        # Proposal-bound dispatch still runs on the gate's resolution: the
-        # bytes actually served by the source, never a caller's substitute.
+    elif corrupt == "script-bytes":
+        # The catalog's standing match refuses on the resolved digest, and
+        # the proposal-bound path dispatches only the gate-resolved bytes —
+        # never a caller's substitute.
         assert outcome.dispatched
         assert calls == [scripts[SCRIPT_PATH]]
         assert calls != [SCRIPT_BYTES]
@@ -734,7 +821,7 @@ def test_script_source_returning_non_bytes_refuses_fail_closed(
     issued = harness.issue()
     harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
     harness.scripts[SCRIPT_PATH] = None  # type: ignore[assignment]
-    outcome = harness.gate.execute(make_request(token=issued.token, standing=None), harness.executor)
+    outcome = harness.gate.execute(make_request(token=issued.token), harness.executor)
     assert not outcome.dispatched
     assert "script could not be resolved" in outcome.refusal
     assert harness.executor_calls == []

@@ -16,7 +16,7 @@ flowchart TD
     PROPOSE -->|"proposal_id, invocation_digest,<br>expires_at, one-time token (once)"| HOST
     PROPOSE --> EVIDENCE{"Required procedural evidence?"}
     EVIDENCE -->|"No"| REFUSE["Refuse execution and record reason"]
-    EVIDENCE -->|"Yes"| PRECONDITIONS{"Preconditions met?"}
+    EVIDENCE -->|"Yes"| PRECONDITIONS{"Preconditions observed fresh through<br>operator-configured observers?"}
     PRECONDITIONS -->|"No"| REFUSE
     PRECONDITIONS -->|"Yes"| TOKEN{"One-time token valid?"}
     TOKEN -->|"Unknown, expired, or reused"| REFUSE

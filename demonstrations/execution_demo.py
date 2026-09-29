@@ -73,16 +73,45 @@ def run_demonstration() -> dict:
 
     import os as _os
 
-    from helpers import FakeClock  # tests package helper
+    from helpers import FakeClock, make_observer_registry, make_policy_document, load_test_policy  # tests package helper
 
     path = os.path.join(tempfile.mkdtemp(prefix="ops-guard-demo-"), "ops-guard.db")
     clock = FakeClock()
     audit = AuditLog(AuditStore(path), fingerprint_key=_os.urandom(32), clock=clock)
     service = ProposalService(ProposalStore(path), token_key=_os.urandom(32), clock=clock, audit=audit)
     verifier = ApprovalVerifier(ApprovalStore(path), service, operator_identity=OPERATOR, clock=clock)
+    registry = make_observer_registry({"static_test": "passing"})
+    policy = load_test_policy(
+        make_policy_document(
+            runbook_id=runbook["runbook_id"],
+            revision=runbook["revision"],
+            content_hash=revision_hash,
+            standing=[parse_authorization({
+                "authorization_id": "auth-restart-n8n",
+                "script_path": SCRIPT_PATH,
+                "script_sha256": SCRIPT_SHA256,
+                "action": "restart",
+                "target": "n8n",
+                "arguments": {"service": "n8n", "timeout_seconds": 30},
+                "preconditions": [{"name": "healthcheck", "expected": "passing"}],
+                "runbook_revision_hash": revision_hash,
+            })],
+        ),
+        registry,
+    )
     gate = ExecutionGate(
         service, verifier, audit,
         runbooks=library, script_source=scripts.__getitem__, clock=clock,
+        observer_registry=registry, authorization_catalog=policy,
+        operator_identity=OPERATOR,
+    )
+    approval_only_policy = load_test_policy(
+        make_policy_document(
+            runbook_id=runbook["runbook_id"],
+            revision=runbook["revision"],
+            content_hash=revision_hash,
+        ),
+        registry,
     )
 
     standing = parse_authorization({
@@ -133,13 +162,28 @@ def run_demonstration() -> dict:
             token=token,
             script_path=SCRIPT_PATH,
             citation=citation,
-            observed_preconditions={"healthcheck": "passing"},
-            operator_identity=OPERATOR,
-            standing=standing,
             expected_digest=None,
         )
         fields.update(overrides)
         return ExecutionRequest(**fields)
+
+    def use_standing() -> None:
+        nonlocal gate
+        gate = ExecutionGate(
+            service, verifier, audit,
+            runbooks=library, script_source=scripts.__getitem__, clock=clock,
+            observer_registry=registry, authorization_catalog=policy,
+            operator_identity=OPERATOR,
+        )
+
+    def use_approval_only() -> None:
+        nonlocal gate
+        gate = ExecutionGate(
+            service, verifier, audit,
+            runbooks=library, script_source=scripts.__getitem__, clock=clock,
+            observer_registry=registry, authorization_catalog=approval_only_policy,
+            operator_identity=OPERATOR,
+        )
 
     def scenario(name: str, request_obj: ExecutionRequest, worker=executor) -> None:
         before = len(harness_executor_calls)
@@ -147,13 +191,15 @@ def run_demonstration() -> dict:
         record(name, len(harness_executor_calls) > before, outcome)
 
     # 1. Standing-authorization success.
+    use_standing()
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
     scenario("standing-authorization-success", request(issued.token, expected_digest=issued.invocation_digest))
 
     # 2. Independent approval success.
+    use_approval_only()
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
     verifier.record_approval(issued.token, operator_identity=OPERATOR)
-    scenario("independent-approval-success", request(issued.token, standing=None))
+    scenario("independent-approval-success", request(issued.token))
 
     # 3. Missing-evidence refusal.
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
@@ -179,9 +225,12 @@ def run_demonstration() -> dict:
     )
     scenario("stale-evidence-refusal", request(issued.token, citation=stale_citation))
 
-    # 5. Failed-precondition refusal.
+    # 5. Failed-precondition refusal: the operator's own observer reports
+    # the wrong state — caller-supplied values are no longer accepted.
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
-    scenario("failed-precondition-refusal", request(issued.token, observed_preconditions={"healthcheck": "failing"}))
+    registry._test_state["value"] = "failing"
+    scenario("failed-precondition-refusal", request(issued.token))
+    registry._test_state["value"] = "passing"
 
     # 6. Invalid-token refusal.
     scenario("invalid-token-refusal", request("never-issued"))
@@ -197,6 +246,8 @@ def run_demonstration() -> dict:
     gate = ExecutionGate(
         service, verifier, audit,
         runbooks=library, script_source=scripts.__getitem__, clock=clock,
+        observer_registry=registry, authorization_catalog=approval_only_policy,
+        operator_identity=OPERATOR,
     )
 
     # 8. Audit-write refusal (execution-start append fails; nothing runs).
@@ -213,6 +264,7 @@ def run_demonstration() -> dict:
     audit.append_on = original_append_on  # type: ignore[method-assign]
 
     # 9. Reused-token refusal (replay after a successful dispatch).
+    use_standing()  # the standing-authorization path dispatches unattended
     issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
     scenario("reused-token-first-dispatch", request(issued.token))
     scenario("reused-token-refusal", request(issued.token))

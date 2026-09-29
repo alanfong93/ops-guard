@@ -294,6 +294,17 @@ def _recovery_wiring(db_path, token_key, clock, owner):
     verifier = _AV(ApprovalStore(str(db_path)), service, operator_identity="alan", clock=clock)
     library, _ = RunbookLibrary.load([VALID_RUNBOOK])
     scripts = {"/opt/scripts/restart-n8n.sh": b"#!/bin/sh\n"}
+    from helpers import make_observer_registry, make_policy_document, load_test_policy
+
+    registry = make_observer_registry({"static_test": "passing"})
+    policy = load_test_policy(
+        make_policy_document(
+            runbook_id=VALID_RUNBOOK["runbook_id"],
+            revision=VALID_RUNBOOK["revision"],
+            content_hash=VALID_RUNBOOK["content_hash"],
+        ),
+        registry,
+    )
     gate = ExecutionGate(
         service,
         verifier,
@@ -301,6 +312,9 @@ def _recovery_wiring(db_path, token_key, clock, owner):
         runbooks=library,
         script_source=scripts.__getitem__,
         clock=clock,
+        observer_registry=registry,
+        authorization_catalog=policy,
+        operator_identity="alan",
         owner=owner,
     )
     citation = Citation(
@@ -337,8 +351,6 @@ def _dispatch_crash(audit, verifier, gate, service, citation):
             token=issued.token,
             script_path="/opt/scripts/restart-n8n.sh",
             citation=citation,
-            observed_preconditions={"healthcheck": "passing"},
-            operator_identity="alan",
         )
         gate.execute(request, lambda invocation, script_bytes: "success")
     except AuditWriteFailure:
@@ -446,8 +458,6 @@ def test_recovery_never_touches_a_terminal_outcome(db_path, token_key, clock) ->
             content_hash=_RB["content_hash"],
             locator="restart/steps",
         ),
-        observed_preconditions={"healthcheck": "passing"},
-        operator_identity="alan",
     )
     outcome = gate.execute(request, lambda invocation, script_bytes: "success")
     assert outcome.dispatched

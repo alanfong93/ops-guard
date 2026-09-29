@@ -147,7 +147,18 @@ def _recovery_gate(path, clock, service, verifier, audit, owner):
     from ops_guard.retrieval import RunbookLibrary
     from tests_helpers_runbook import VALID_RUNBOOK as RB
 
+    from helpers import make_observer_registry, make_policy_document, load_test_policy
+
     library, _ = RunbookLibrary.load([RB])
+    registry = make_observer_registry({"static_test": "passing"})
+    policy = load_test_policy(
+        make_policy_document(
+            runbook_id=RB["runbook_id"],
+            revision=RB["revision"],
+            content_hash=RB["content_hash"],
+        ),
+        registry,
+    )
     return ExecutionGate(
         service,
         verifier,
@@ -155,6 +166,9 @@ def _recovery_gate(path, clock, service, verifier, audit, owner):
         runbooks=library,
         script_source={"/opt/scripts/restart-n8n.sh": b"#!/bin/sh\n"}.__getitem__,
         clock=clock,
+        observer_registry=registry,
+        authorization_catalog=policy,
+        operator_identity="alan",
         owner=owner,
     )
 
@@ -204,8 +218,6 @@ def test_recovery_invariants_hold_for_arbitrary_sequences(events: list, sweeps: 
             token=issued.token,
             script_path="/opt/scripts/restart-n8n.sh",
             citation=citation,
-            observed_preconditions={"healthcheck": "passing"},
-            operator_identity="alan",
         )
 
         if event == "completed":

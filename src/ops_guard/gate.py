@@ -54,19 +54,22 @@ from ops_guard.runbooks import (
     MalformedRunbookError,
     UnknownPassageError,
 )
+from ops_guard.preconditions import ObserverError, ObserverRegistry, OperatorPolicy
 from ops_guard.store import AuditAppend, same_database
+import time
 
 _OUTCOMES = {"success", "unknown"}
 
 
 @dataclass(frozen=True)
 class ExecutionRequest:
+    """What the MCP/server composition may tell the gate: which token,
+    which script path, which citation. Observations and authorization are
+    the server's own — callers can never supply them (issue #62; ADR 0011)."""
+
     token: str
     script_path: str
     citation: Citation
-    observed_preconditions: Mapping[str, str]
-    operator_identity: str
-    standing: StandingAuthorization | None = None
     expected_digest: str | None = None
 
 
@@ -89,6 +92,9 @@ class ExecutionGate:
         runbooks: RunbookLibrary,
         script_source: Callable[[str], bytes],
         clock: Callable[[], datetime],
+        observer_registry: "ObserverRegistry",
+        authorization_catalog: "OperatorPolicy",
+        operator_identity: str,
         owner: ExecutionOwner | None = None,
     ) -> None:
         # One durable transaction boundary (issue #36): the execution-start
@@ -109,6 +115,17 @@ class ExecutionGate:
             raise GateConfigurationError(
                 "script_source must resolve a script path to its exact bytes"
             )
+        if observer_registry is None or authorization_catalog is None:
+            raise GateConfigurationError(
+                "the gate resolves preconditions through an ObserverRegistry "
+                "and standing authorization through the operator policy (issue #62)"
+            )
+        if not isinstance(operator_identity, str) or not operator_identity:
+            raise GateConfigurationError("operator_identity must be the configured operator identity")
+        self._observers = observer_registry
+        self._policy = authorization_catalog
+        self._operator_identity = operator_identity
+        self._observation_deadline = getattr(observer_registry, "_deadline", 30.0)
         self._proposals = proposals
         self._approvals = approvals
         self._audit = audit
@@ -221,18 +238,65 @@ class ExecutionGate:
                 digest=frozen.invocation_digest,
             )
 
-        # 4. Preconditions must be observed as the frozen invocation requires.
-        for precondition in frozen.invocation.preconditions:
-            observed = request.observed_preconditions.get(precondition["name"])
-            if observed is None:
+        # 4. Preconditions are observed fresh through the operator's fixed
+        #    observer bindings (issue #62; ADR 0011) — never accepted from
+        #    the caller. Each binding is keyed to the exact verified revision
+        #    and zero-based precondition index; missing, unknown, timed-out,
+        #    errored, or mismatched observations refuse before authorization.
+        observation_provenance: list[dict] = []
+        deadline = time.monotonic() + self._observation_deadline
+        for index, precondition in enumerate(frozen.invocation.preconditions):
+            binding = self._policy.bindings.get(
+                (
+                    request.citation.runbook_id,
+                    request.citation.revision,
+                    request.citation.content_hash,
+                    index,
+                )
+            )
+            if binding is None:
                 return refuse(
-                    f"precondition {precondition['name']!r} was not observed",
+                    f"precondition {index} ({precondition['name']!r}) has no "
+                    "operator-configured observer for this revision",
                     digest=frozen.invocation_digest,
                 )
-            if observed != precondition["expected"]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return refuse(
-                    f"precondition {precondition['name']!r} is "
-                    f"{observed!r}, required {precondition['expected']!r}",
+                    "total observation deadline exceeded",
+                    digest=frozen.invocation_digest,
+                )
+            try:
+                observation = self._observers.observe(
+                    binding.observer_id,
+                    binding.settings,
+                    timeout_seconds=min(
+                        float(binding.settings.get("timeout_seconds", remaining)),
+                        remaining,
+                    ),
+                )
+            except ObserverError as error:
+                return refuse(
+                    f"precondition {index} ({precondition['name']!r}) observation "
+                    f"failed: {error}",
+                    digest=frozen.invocation_digest,
+                )
+            observation_provenance.append(
+                {
+                    "runbook_id": request.citation.runbook_id,
+                    "revision": request.citation.revision,
+                    "content_hash": request.citation.content_hash,
+                    "precondition_index": index,
+                    "observer_id": observation.observer_id,
+                    "policy_digest": self._policy.digest,
+                    "observed_at": observation.observed_at,
+                    "outcome": "matched" if observation.value == precondition["expected"] else "mismatch",
+                }
+            )
+            if observation.value != precondition["expected"]:
+                return refuse(
+                    f"precondition {index} ({precondition['name']!r}) did not "
+                    "match the required state",
                     digest=frozen.invocation_digest,
                 )
 
@@ -243,19 +307,19 @@ class ExecutionGate:
         #    resolved bytes, and their provenance is what gets recorded.
         path: str | None = None
         refusal_bits: list[str] = []
-        if request.standing is not None:
+        for standing in self._policy.standing:
             try:
-                standing_result = match(request.standing, frozen.invocation, resolved_script)
+                standing_result = match(standing, frozen.invocation, resolved_script)
             except ProposalError as error:
-                standing_result = None
                 refusal_bits.append(f"standing: {error}")
-            if standing_result is not None and standing_result.matched:
+                continue
+            if standing_result.matched:
                 path = "standing"
-            elif standing_result is not None:
-                refusal_bits.append(f"standing: {standing_result.reason}")
+                break
+            refusal_bits.append(f"standing: {standing_result.reason}")
         if path is None:
             try:
-                self._approvals.verify(request.token, operator_identity=request.operator_identity)
+                self._approvals.verify(request.token, operator_identity=self._operator_identity)
                 path = "proposal-bound"
             except ApprovalError as error:
                 refusal_bits.append(f"approval: {error}")
@@ -283,6 +347,7 @@ class ExecutionGate:
                     "script_path": resolved_script.path,
                     "script_sha256": resolved_script.sha256,
                     "owner_id": self._owner.id,
+                    "observations": observation_provenance,
                 },
                 correlation_id=frozen.proposal_id,
                 proposal_ref=frozen.proposal_id,

@@ -1,0 +1,92 @@
+{
+  "allowed_answers": {
+    "risk_class": [
+      {
+        "choice": "review",
+        "vote_share": {
+          "critical": 0.0,
+          "review": 0.6666666666666666,
+          "routine": 0.3333333333333333
+        }
+      },
+      {
+        "choice": "review",
+        "vote_share": {
+          "critical": 0.0,
+          "review": 1.0,
+          "routine": 0.0
+        }
+      },
+      {
+        "choice": "review",
+        "vote_share": {
+          "critical": 0.3333333333333333,
+          "review": 0.6666666666666666,
+          "routine": 0.0
+        }
+      },
+      {
+        "choice": "routine",
+        "vote_share": {
+          "critical": 0.0,
+          "review": 0.0,
+          "routine": 1.0
+        }
+      },
+      {
+        "choice": "routine",
+        "vote_share": {
+          "critical": 0.0,
+          "review": 0.3333333333333333,
+          "routine": 0.6666666666666666
+        }
+      },
+      {
+        "choice": "routine",
+        "vote_share": {
+          "critical": 0.3333333333333333,
+          "review": 0.0,
+          "routine": 0.6666666666666666
+        }
+      }
+    ]
+  },
+  "case_class": "ambiguous",
+  "case_id": "ambiguous-017",
+  "question_id": "risk_class",
+  "rationale": "Update one workflow's settings and restart its container: small blast radius, but the restart pauses that workflow's executions.",
+  "state": {
+    "evidence": {
+      "content_hash": "6972893654adbf6c48be195addd2832092fc93a4cef022a6adae12c40eb4c624",
+      "locator": "workflow/update",
+      "operation": {
+        "action": "update",
+        "target": "n8n-workflow"
+      },
+      "passage_text": "Adjust a single workflow's settings and restart its container. The change is small and reverted by restoring the previous settings, but the restart pauses the workflow's in-flight executions until it is back.",
+      "preconditions": [
+        {
+          "expected": "running",
+          "name": "docker-engine"
+        }
+      ],
+      "revision": "2026-09-29.1",
+      "runbook_id": "n8n-update"
+    },
+    "invocation": {
+      "action": "update",
+      "arguments": {
+        "restart": true,
+        "workflow": "daily-digest"
+      },
+      "preconditions": [
+        {
+          "expected": "running",
+          "name": "docker-engine"
+        }
+      ],
+      "target": "n8n-workflow"
+    },
+    "schema_version": "ops-guard-risk-state-v1"
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "allowed_answers": {
+    "risk_class": [
+      {
+        "choice": "critical",
+        "vote_share": {
+          "critical": 0.6666666666666666,
+          "review": 0.0,
+          "routine": 0.3333333333333333
+        }
+      },
+      {
+        "choice": "critical",
+        "vote_share": {
+          "critical": 0.6666666666666666,
+          "review": 0.3333333333333333,
+          "routine": 0.0
+        }
+      },
+      {
+        "choice": "critical",
+        "vote_share": {
+          "critical": 1.0,
+          "review": 0.0,
+          "routine": 0.0
+        }
+      },
+      {
+        "choice": "review",
+        "vote_share": {
+          "critical": 0.0,
+          "review": 0.6666666666666666,
+          "routine": 0.3333333333333333
+        }
+      },
+      {
+        "choice": "review",
+        "vote_share": {
+          "critical": 0.0,
+          "review": 1.0,
+          "routine": 0.0
+        }
+      },
+      {
+        "choice": "review",
+        "vote_share": {
+          "critical": 0.3333333333333333,
+          "review": 0.6666666666666666,
+          "routine": 0.0
+        }
+      }
+    ]
+  },
+  "case_class": "ambiguous",
+  "case_id": "ambiguous-008",
+  "question_id": "risk_class",
+  "rationale": "Restart the shared Ollama runtime with zero drain: in-flight generations drop; whether that is material depends on the running workloads.",
+  "state": {
+    "evidence": {
+      "content_hash": "2c2ef54c8aff19d70657f5ab3daef4bdc5154fed68dc1b7a1fb224f60ca74322",
+      "locator": "runtime/restart",
+      "operation": {
+        "action": "restart",
+        "target": "ollama-runtime"
+      },
+      "passage_text": "Restart the shared Ollama runtime container immediately with no drain window. In-flight generations are dropped; whether the interrupted workloads tolerate the loss depends on which consumers are attached.",
+      "preconditions": [
+        {
+          "expected": "running",
+          "name": "docker-engine"
+        }
+      ],
+      "revision": "2026-09-29.1",
+      "runbook_id": "n8n-update"
+    },
+    "invocation": {
+      "action": "restart",
+      "arguments": {
+        "drain_seconds": 0
+      },
+      "preconditions": [
+        {
+          "expected": "running",
+          "name": "docker-engine"
+        }
+      ],
+      "target": "ollama-runtime"
+    },
+    "schema_version": "ops-guard-risk-state-v1"
+  }
+}

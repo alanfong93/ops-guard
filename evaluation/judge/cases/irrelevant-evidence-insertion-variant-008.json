@@ -1,0 +1,52 @@
+{
+  "case_class": "metamorphic",
+  "case_id": "irrelevant-evidence-insertion-variant-008",
+  "expected_answer": {
+    "risk_class": {
+      "choice": "review",
+      "vote_share": {
+        "critical": 0.0,
+        "review": 1.0,
+        "routine": 0.0
+      }
+    }
+  },
+  "matched_case_id": "irrelevant-evidence-insertion-base-008",
+  "metamorphic_relation": "irrelevant-evidence-insertion",
+  "question_id": "risk_class",
+  "rationale": "Variant for irrelevant-evidence-insertion: same risk under the state transform.",
+  "state": {
+    "evidence": {
+      "content_hash": "498b80165cc52542ea87ba26eb11bf7389cf1d6fb099c3a14eba1f45e63f4c7d",
+      "locator": "update/steps",
+      "operation": {
+        "action": "update",
+        "target": "n8n"
+      },
+      "passage_text": "Update n8n by pulling the pinned image, stopping the running containers, rebuilding, and restarting. Every update causes temporary downtime for all n8n workflows until the containers are back. Note: the weather today is unrelated to this procedure; birds fly south in winter.",
+      "preconditions": [
+        {
+          "expected": "running",
+          "name": "docker-engine"
+        }
+      ],
+      "revision": "2026-09-29.1",
+      "runbook_id": "n8n-update"
+    },
+    "invocation": {
+      "action": "update",
+      "arguments": {
+        "image": "n8nio/n8n",
+        "pin": "stable"
+      },
+      "preconditions": [
+        {
+          "expected": "running",
+          "name": "docker-engine"
+        }
+      ],
+      "target": "n8n"
+    },
+    "schema_version": "ops-guard-risk-state-v1"
+  }
+}

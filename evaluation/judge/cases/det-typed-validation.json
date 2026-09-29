@@ -1,0 +1,49 @@
+{
+  "case_class": "deterministic",
+  "case_id": "det-typed-validation",
+  "deterministic_category": "typed_validation",
+  "expected_question_error": {
+    "risk_class": "INVALID_MODEL_OUTPUT"
+  },
+  "port_script": [
+    "definitely-not-json",
+    "definitely-not-json",
+    "definitely-not-json"
+  ],
+  "question_id": "risk_class",
+  "rationale": "Raw model output outside the sample union is locally revalidated and rejected.",
+  "state": {
+    "evidence": {
+      "content_hash": "c8b2a419ace09a65d7cdf02b945623151c5ad20ba7d699ba25b68f0af14b8191",
+      "locator": "update/verify-connectivity",
+      "operation": {
+        "action": "verify",
+        "target": "n8n"
+      },
+      "passage_text": "After any update, verify n8n-to-Ollama connectivity: request the Ollama API version from inside the n8n container with a wget probe. The check reads state only and changes nothing on either service.",
+      "preconditions": [
+        {
+          "expected": "running",
+          "name": "docker-engine"
+        }
+      ],
+      "revision": "2026-09-29.1",
+      "runbook_id": "n8n-update"
+    },
+    "invocation": {
+      "action": "verify",
+      "arguments": {
+        "mode": "connectivity-check",
+        "timeout_seconds": 10
+      },
+      "preconditions": [
+        {
+          "expected": "running",
+          "name": "docker-engine"
+        }
+      ],
+      "target": "n8n"
+    },
+    "schema_version": "ops-guard-risk-state-v1"
+  }
+}

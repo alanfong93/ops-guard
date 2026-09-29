@@ -377,3 +377,31 @@ def test_fingerprint_binds_state_and_question_id() -> None:
     assert results["q1"]["request_fingerprint"] != results["q2"]["request_fingerprint"]
     again = judge.evaluate_question_map(state, ["q1", "q2"])
     assert again["q1"]["request_fingerprint"] == results["q1"]["request_fingerprint"]
+
+def test_think_disabled_toggle_is_injected_into_every_payload() -> None:
+    """ADR 0009 amendment: thinking is disabled at the transport boundary."""
+    class RecordingTransport:
+        def __init__(self):
+            self.payloads = []
+
+        def post(self, path, payload, timeout_ms):
+            self.payloads.append((path, payload, timeout_ms))
+            if path.endswith("/api/show"):
+                return type("R", (), {"status_code": 404, "body": ""})()
+            return type(
+                "R",
+                (),
+                {"status_code": 200, "body": json.dumps({"message": {"content": '"routine"'}})},
+            )()
+
+    from ops_guard.judge import ThinkDisabledTransport, LocalJudge
+
+    inner = RecordingTransport()
+    judge = LocalJudge(transport=inner, fingerprint=lambda value: "fp")
+    projection = judge.evaluate_risk(sample_state())
+    assert projection["status"] == "answered"
+    chats = [p for p in inner.payloads if p[0].endswith("/api/chat")]
+    assert len(chats) == 3
+    for _path, payload, _timeout in chats:
+        assert payload["think"] is False
+        assert "think" not in payload.get("options", {})

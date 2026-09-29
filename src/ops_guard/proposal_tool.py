@@ -71,8 +71,14 @@ def register_propose_fix(
     library,
     proposals,
     ttl: timedelta,
+    judge,
 ) -> None:
-    """Register `propose_fix` on the shared authenticated FastMCP server."""
+    """Register `propose_fix` on the shared authenticated FastMCP server.
+
+    ``judge`` is required (issue #58): every call records an advisory
+    result or typed failure on the proposal audit event, before the
+    proposal transaction opens. It never raises past the tool boundary and
+    its outcome never changes what this tool returns."""
 
     @server.tool
     def propose_fix(
@@ -121,8 +127,22 @@ def register_propose_fix(
             frozen.canonical_bytes()
         except (TypeError, ValueError) as error:
             raise ToolError(f"invalid_invocation: {error}") from error
+        # Advisory local risk judgment (issue #58; ADR 0009): composed from
+        # the validated invocation and the resolved verified citation only.
+        # Audit-only — never returned, never read by the gate; any judge
+        # outcome (including every failure code) still creates the proposal.
+        from ops_guard.judge import judge_state
+
+        snapshot = judge.evaluate_risk(
+            judge_state(
+                invocation_json=frozen.to_json(),
+                cited_passage=cited,
+            )
+        )
         try:
-            issued = proposals.open_proposal(frozen, ttl=ttl, evidence_refs=citation_ref)
+            issued = proposals.open_proposal(
+                frozen, ttl=ttl, evidence_refs=citation_ref, judge_snapshot=snapshot
+            )
         except (ProposalError, AuditWriteFailure, ValueError) as error:
             raise ToolError(f"proposal_write_failed: {error}") from error
         return {

@@ -64,8 +64,14 @@ class Wiring:
         with self.service.store.transaction() as conn:
             conn.execute("SELECT 1").fetchone()
         self.library = corpus_library()
+        from test_proposal_tool import hermetic_judge
+
         self.server = build_mcp_server(
-            self.library, self.audit, proposals=self.service, proposal_ttl=timedelta(minutes=15)
+            self.library,
+            self.audit,
+            proposals=self.service,
+            proposal_ttl=timedelta(minutes=15),
+            judge=hermetic_judge(self.audit),
         )
         self.verifier = ApprovalVerifier(
             ApprovalStore(self.db_path), self.service, operator_identity="alan", clock=self.clock

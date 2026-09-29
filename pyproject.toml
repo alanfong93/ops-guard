@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "fastmcp>=4,<5",
     "jcs>=0.2.1",
+    "local-judge @ git+https://github.com/alanfong93/local-judge@fca3fbde28312e7a1fa18940b8738ae406714f43",
 ]
 
 [project.optional-dependencies]

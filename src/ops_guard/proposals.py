@@ -20,7 +20,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Mapping, Optional
 
 from ops_guard.errors import (
     FrozenInvocationTamperedError,
@@ -127,12 +127,16 @@ class ProposalService:
         *,
         ttl: timedelta,
         evidence_refs: Sequence[str] = (),
+        judge_snapshot: Mapping | None = None,
     ) -> IssuedProposal:
         """Freeze the invocation, mint a 256-bit token, fix the absolute expiry.
 
         ``evidence_refs`` (issue #57) records the proposal-time citation as
         provenance in the same insert transaction; it never enters the
-        frozen invocation bytes or its digest."""
+        frozen invocation bytes or its digest. ``judge_snapshot`` (issue #58)
+        carries the closed advisory projection on the same audit event —
+        audit-only: no gate reads it, and its presence or absence never
+        changes issuance."""
         if not isinstance(ttl, timedelta) or ttl.total_seconds() <= 0:
             raise ValueError("ttl must be a positive timedelta")
         now = self._now()
@@ -171,6 +175,7 @@ class ProposalService:
                 },
                 correlation_id=proposal_id,
                 evidence_refs=evidence_refs,
+                judge_snapshot=judge_snapshot,
             )
         return IssuedProposal(
             proposal_id=proposal_id,

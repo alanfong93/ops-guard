@@ -25,6 +25,9 @@ The named retrieval comparator and assessment method recorded with a published r
 ### Judge advisory signal
 An estimate attached to a judge risk assessment. Its meaning and derivation are recorded with the audit event; it never grants, withdraws, or substitutes for authorization, is not evidence that the assessment is correct, and judge unavailability does not grant authorization. Authority: `docs/PRODUCT.md`. Rejected alias: **"safety score"** — the signal is not a safety guarantee and must never read as one.
 
+### Risk class
+The advisory local-judge label recorded on a proposal audit event: `routine` (low-impact, readily reversible), `review` (material or context-dependent impact worth human inspection), or `critical` (plausible severe, destructive, security, availability, or irreversible impact). It is derived from repeated-sample agreement over a fixed menu — agreement is consistency, never confidence — and is audit-only until the evaluation gate passes. Authority: [ADR 0009](docs/adr/0009-local-advisory-judge-audit-projection.md); constraint: `docs/PRODUCT.md`. Rejected alias: **"severity"** — the class is an advisory estimate of operational impact, not a measured or declared severity.
+
 ### Observed outcome
 The execution result recorded after the operation: success, failure, or an explicitly unknown completion when the result cannot be confirmed. Authority: [execution demonstration](docs/execution-demonstration.md); constraint: `docs/PRODUCT.md`. Rejected alias: **"result"** unqualified — an unconfirmed completion must be recorded as unknown, not silently treated as success.
 

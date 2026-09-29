@@ -38,14 +38,21 @@ report is a valid evaluation outcome, not a broken gate.
 | adversarial_matched_pairs (≥20, drop ≤10 pp) | **fail** — 0 pairs answerable |
 | metamorphic_invariance (≥0.8 per relation) | **fail** — 0 answered entries |
 
-Failure counts (sidecar, per question entry across live classes): 269
+Failure counts (sidecar, per question entry across live classes — produced by the evaluation face as supplemental instrumentation, never by the pinned runner, whose own inability_rate and coverage denominators appear in `report-v1.json` under `authoritative.metrics`): 269
 `INSUFFICIENT_EVIDENCE`, 139 `AMBIGUOUS_EVIDENCE`, 2
 `UNSUPPORTED_QUESTION` — 410 of 410 non-answers. Zero `MODEL_TIMEOUT`
 (thinking disabled keeps every sample well inside the 10 s budget); zero
 invalid outputs; zero backend errors. Agreement distribution: none (no
-answered entries). Supplemental full-map invariance: 20/20 pairs per
-relation — vacuous, since inability results are trivially identical; the
-authoritative runner does not count unanswered entries as invariant.
+answered entries). Supplemental full-map invariance: **not evaluable** — all 20 pairs per
+relation have non-answered entries on at least one side, so no pair
+exercises the invariance comparison (identical inabilities are not
+evidence of invariance); the report marks every relation `vacuous: true`
+with `answered_pairs: 0`. The authoritative runner likewise scores
+invariance 0.0 because it counts answered entries only.
+
+## Expectation versus outcome
+
+The live fixtures were built to be answerable: every invocation is paired with evidence describing the same operation, and the labelled classes follow the menu definitions. The abstention below was **discovered**, not designed: pilot probes before the declared run found the model answering the same classification through a plain prompt and refusing it through the pinned engine contract. The declared run then measured that finding across the full corpus.
 
 ## Diagnosis (from the pilot probes recorded before the declared run)
 

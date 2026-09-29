@@ -238,45 +238,57 @@
   "prompt_version": "ops-guard-risk-prompt-v1",
   "provenance": {
     "corpus_manifest": "ops-guard-judge-corpus-v1",
-    "elapsed_seconds": 288.4,
+    "elapsed_seconds": 279.6,
     "local_judge_pinned_commit": "fca3fbde28312e7a1fa18940b8738ae406714f43",
     "ollama": {
       "cold_start_expected": false,
       "digest": null,
-      "first_probe_seconds": 0.053,
+      "first_probe_seconds": 0.051,
       "ollama_version": "0.34.4",
       "reachable": true
     },
-    "ops_guard_revision": "7d10615e2796a9904c7720ac680f28583e95c0d4",
-    "recorded_at": "2026-09-29T14:45:10+00:00",
+    "ops_guard_revision": "bf94817cd4518dba88c7e70fac698bca3d121476",
+    "recorded_at": "2026-09-29T15:05:12+00:00",
     "warmup_note": "A single pre-run smoke call loaded the model after an initial cold timeout was observed and recorded; the declared run itself performs no warmup and no selective retries."
   },
   "report_schema_version": "ops-guard-judge-report-v1",
   "rubric_version": "ops-guard-risk-rubric-v1",
   "supplemental_full_map_invariance": {
     "id-aligned-permutation": {
-      "invariant": 20,
+      "answered_pairs": 0,
+      "invariant": 0,
       "min_required": 0.8,
+      "not_evaluable": 20,
       "pairs": 20,
-      "rate": 1.0
+      "rate": null,
+      "vacuous": true
     },
     "irrelevant-evidence-insertion": {
-      "invariant": 20,
+      "answered_pairs": 0,
+      "invariant": 0,
       "min_required": 0.8,
+      "not_evaluable": 20,
       "pairs": 20,
-      "rate": 1.0
+      "rate": null,
+      "vacuous": true
     },
     "json-key-reorder": {
-      "invariant": 20,
+      "answered_pairs": 0,
+      "invariant": 0,
       "min_required": 0.8,
+      "not_evaluable": 20,
       "pairs": 20,
-      "rate": 1.0
+      "rate": null,
+      "vacuous": true
     },
     "question-map-reorder": {
-      "invariant": 20,
+      "answered_pairs": 0,
+      "invariant": 0,
       "min_required": 0.8,
+      "not_evaluable": 20,
       "pairs": 20,
-      "rate": 1.0
+      "rate": null,
+      "vacuous": true
     }
   }
 }

@@ -101,8 +101,17 @@ def ollama_probe() -> dict:
 def supplemental_full_map(cases: list[dict], face: EvaluationFace) -> dict:
     """Full-map invariance per relation: companion results compared after
     ID alignment; a missing, extra, invalid, or changed companion fails the
-    pair even when the target is unchanged."""
-    relations = {r: {"pairs": 0, "invariant": 0} for r in METAMORPHIC_RELATIONS}
+    pair even when the target is unchanged.
+
+    Invariance is only meaningful over ANSWERED pairs: two identical
+    inabilities are not evidence of invariance. A pair where either side
+    has any non-answered entry is reported as not-evaluable and stays in
+    the denominator; when no pair is evaluable the relation is marked
+    vacuous rather than passing."""
+    relations = {
+        r: {"pairs": 0, "answered_pairs": 0, "invariant": 0, "not_evaluable": 0}
+        for r in METAMORPHIC_RELATIONS
+    }
     case_by_id = {c["case_id"]: c for c in cases}
     for case in cases:
         if case.get("case_class") != "metamorphic" or case.get("metamorphic_relation") is None:
@@ -112,14 +121,27 @@ def supplemental_full_map(cases: list[dict], face: EvaluationFace) -> dict:
         partner = case_by_id.get(partner_id)
         if partner is None or case["case_id"] > partner_id:
             continue  # count each pair once, from its lexicographically first side
-        relations[relation]["pairs"] += 1
+        stats = relations[relation]
+        stats["pairs"] += 1
+        both_answered = face.full_map_answered(case["case_id"], partner_id)
+        if not both_answered:
+            stats["not_evaluable"] += 1
+            continue
+        stats["answered_pairs"] += 1
         if face.full_map_invariance(case["case_id"], partner_id):
-            relations[relation]["invariant"] += 1
+            stats["invariant"] += 1
     return {
         relation: {
             "pairs": stats["pairs"],
+            "answered_pairs": stats["answered_pairs"],
             "invariant": stats["invariant"],
-            "rate": (stats["invariant"] / stats["pairs"]) if stats["pairs"] else None,
+            "not_evaluable": stats["not_evaluable"],
+            "rate": (
+                stats["invariant"] / stats["answered_pairs"]
+                if stats["answered_pairs"]
+                else None
+            ),
+            "vacuous": stats["answered_pairs"] == 0,
             "min_required": 0.8,
         }
         for relation, stats in sorted(relations.items())

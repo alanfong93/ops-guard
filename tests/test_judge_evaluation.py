@@ -21,6 +21,8 @@ sys.path.insert(0, HERE)
 
 from evaluation.judge.corpus import (  # noqa: E402
     COMPANION_IDS,
+    build_state,
+    case_hash,
     METAMORPHIC_RELATIONS,
     PAIRS_PER_RELATION,
     base_state,
@@ -213,24 +215,31 @@ def test_timeout_is_a_counted_non_answer() -> None:
     assert counts["by_case_class"]["normal"]["MODEL_TIMEOUT"] == 1
 
 
-def test_supplemental_full_map_reports_per_relation_rates() -> None:
+def test_supplemental_full_map_answers_and_vacuity() -> None:
+    """Answered pairs rate over answered denominators; all-inability pairs
+    are not-evaluable and vacuous — never reported as invariant."""
     _, cases = load_corpus()
     relation_cases = [
         c
         for c in cases
         if c.get("case_class") == "metamorphic"
-        and c.get("metamorphic_relation") in ("json-key-reorder",)
+        and c.get("metamorphic_relation") == "json-key-reorder"
     ][:4]  # two pairs
+    # answered pair: identical scripts
     face = EvaluationFace(port=None)
-    script = ['"routine"'] * 9
     for case in relation_cases:
-        scripted = {**case, "port_script": script}
-        face(scripted)
-    # reuse the supplemental helper against a face primed with these ids
-    result = face.full_map_invariance(
-        relation_cases[0]["case_id"], relation_cases[0]["matched_case_id"]
-    )
-    assert result is True
+        face({**case, "port_script": ['"routine"'] * 9})
+    assert face.full_map_answered(relation_cases[0]["case_id"], relation_cases[0]["matched_case_id"])
+    assert face.full_map_invariance(relation_cases[0]["case_id"], relation_cases[0]["matched_case_id"])
+
+    # non-answered pair: identical inabilities are NOT evaluable
+    face2 = EvaluationFace(port=None)
+    for case in relation_cases:
+        face2({**case, "port_script": ["@timeout"] * 9})
+    assert not face2.full_map_answered(relation_cases[0]["case_id"], relation_cases[0]["matched_case_id"])
+    # the runner's supplemental classification marks it not-evaluable
+    result = face2.full_map_invariance(relation_cases[0]["case_id"], relation_cases[0]["matched_case_id"])
+    assert result is True  # statuses match trivially; the runner's answered gate is what excludes it
 
 
 def test_transforms_are_non_identity() -> None:
@@ -277,5 +286,66 @@ def test_runner_report_shape_and_non_claims(tmp_path, monkeypatch) -> None:
     )
     for stats in full_map.values():
         assert stats["min_required"] == 0.8
-        assert stats["pairs"] == 0 and stats["rate"] is None
+        assert stats["pairs"] == 0
+        assert stats["rate"] is None and stats["vacuous"] is True
+        assert stats["answered_pairs"] == 0 and stats["not_evaluable"] == 0
     assert report["demonstrated_usefulness"] is True or report["demonstrated_usefulness"] is False
+
+def test_no_three_way_tie_is_ever_an_allowed_answer() -> None:
+    """The 1-1-1 tie is an AGGREGATION_TIE inability — never an allowed
+    answered label (contract: unique-winner distributions only)."""
+    sets = unique_winner_answer_sets()
+    tie = {round(1 / 3, 9)}
+    for members in sets.values():
+        for answer in members:
+            shares = {round(v, 9) for v in answer["vote_share"].values()}
+            assert shares != tie
+
+
+def test_generator_round_trip_hashes_verify(tmp_path, monkeypatch) -> None:
+    """The manifest's per-case hashes verify against the written files."""
+    import hashlib
+
+    from evaluation.judge import run_judge_assessment as runner
+
+    monkeypatch.setattr(runner, "HERE", str(tmp_path))
+    manifest_dir = tmp_path / "cases"
+    manifest_dir.mkdir()
+    from evaluation.judge.generate_corpus import build_cases
+
+    cases = build_cases()
+    manifest_cases = []
+    for case in cases:
+        name = f"{case['case_id']}.json"
+        (manifest_dir / name).write_text(
+            json.dumps(case, indent=2, sort_keys=True, ensure_ascii=False) + chr(10),
+            encoding="utf-8",
+        )
+        manifest_cases.append(
+            {"case_id": case["case_id"], "file": f"cases/{name}", "sha256": case_hash(case)}
+        )
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"corpus_version": "t", "case_count": len(cases), "cases": manifest_cases}),
+        encoding="utf-8",
+    )
+    _, loaded = runner.load_corpus()
+    assert len(loaded) == len(cases)
+
+
+def test_json_key_reorder_survives_to_payload_boundary() -> None:
+    """The reorder must reach the rendered prompt bytes — the model
+    boundary — not be canonicalized away before it gets there."""
+    from evaluation.judge.face import compose_envelope, _fixed_validator
+    from local_judge.executors.choice import ChoiceExecutor
+    from ops_guard.judge import MENU, risk_question
+
+    executor = ChoiceExecutor(dict(MENU))
+    q = risk_question()
+    base = build_state("critical")
+    variant = transform_json_key_reorder(base)
+    rendered = []
+    for state in (base, variant):
+        envelope = _fixed_validator().parse(compose_envelope(state, ["risk_class"]))
+        messages = executor.render_messages("risk_class", envelope.questions["risk_class"].raw, envelope.state)
+        rendered.append(messages[-1]["content"])
+    assert rendered[0] != rendered[1]

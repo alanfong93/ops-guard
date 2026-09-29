@@ -192,6 +192,18 @@ class EvaluationFace:
             "question_ids": list(case.get("question_ids") or [case.get("question_id")]),
         }
 
+    def full_map_answered(self, base_id: str, variant_id: str) -> bool:
+        """True when every entry on BOTH aligned sides is answered — the
+        precondition for a meaningful invariance comparison."""
+        for case_id in (base_id, variant_id):
+            results = (self.sidecar.get(case_id) or {}).get("results") or {}
+            if not results:
+                return False
+            for entry in results.values():
+                if not isinstance(entry, dict) or entry.get("status") != "answered":
+                    return False
+        return True
+
     def full_map_invariance(self, base_id: str, variant_id: str) -> bool:
         """True when the aligned full maps are answer-identical."""
         base = self.sidecar.get(base_id) or {}

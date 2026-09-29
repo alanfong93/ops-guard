@@ -59,7 +59,9 @@ event for every failed check.
   the gate).
 - The demonstration drives the components in-process. The LAN transport
   boundary (`python -m ops_guard`, ADR 0006) is demonstrated separately by
-  the service's real-socket suite; it exposes only `search_runbook` — the
-  propose/approve/execute paths above do not cross the network yet, and the
+  the service's real-socket suite; it exposes `search_runbook` and
+  `propose_fix`. The Telegram approval transport (ADR 0010) is exercised
+  hermetically against a fake Bot API; an opt-in manual smoke path with a
+  dedicated bot records a real approval without executing anything, and the
   script-identity verification residual stays with the execution
   integration (issue #64).

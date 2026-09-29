@@ -9,7 +9,7 @@ C4Context
     System_Ext(host, "MCP-speaking host", "An agent host that requests guidance and submits operations.")
     System(guard, "ops-guard", "Single-operator MCP trust layer for cited guidance, execution gates, and audit records.")
     System_Ext(runbooks, "Verified runbooks", "Operator-reviewed operational procedures.")
-    System_Ext(approval, "Approval channel", "Independent channel that authenticates the configured operator's proposal-bound approval.")
+    System_Ext(approval, "Approval channel", "Independent Telegram transport (dedicated bot, private operator DM) that authenticates the configured operator's proposal-bound approval.")
     System_Ext(audit, "Audit storage", "Durable operational history managed by ops-guard.")
     System_Ext(systems, "Managed systems", "Self-hosted production systems reached only through approved ops-guard operations.")
 
@@ -31,6 +31,32 @@ authentication, not authorization; it never substitutes for standing
 authorization or proposal-bound approval. The LAN listener carries the
 retrieval tool and the host-composed proposal tool; judging, approval, and
 execution surfaces arrive in later stages.
+
+The approval channel is an outbound-only Telegram transport
+([ADR 0010](adr/0010-telegram-approval-transport.md)): the server long-polls
+`getUpdates` on a fresh dedicated bot and delivers proposal previews to one
+configured private operator DM. Only a callback from the configured numeric
+operator in the configured chat records an approval — by proposal id, never
+by recovering the raw token — through the internal verifier's existing
+transaction. The transport is opt-in and disabled by default; a deployment
+that cannot keep the bot token and approval authority outside the proposing
+MCP runtime keeps approval unavailable and execution fail-closed.
+
+```mermaid
+sequenceDiagram
+    participant S as ops-guard server
+    participant T as Telegram Bot API
+    participant O as Operator (private DM)
+    S->>S: proposal committed (id, digest, expiry; token to MCP host once)
+    S->>T: sendMessage preview (plain text, redacted, no token)
+    T->>O: preview + Approve button (final part only)
+    O->>T: tap Approve (callback data = approve:<proposal_id>)
+    S->>T: getUpdates long poll (callback_query only)
+    T-->>S: callback (user id, chat id, message from this bot)
+    S->>S: verify origin, parse data, revalidate frozen proposal in transaction
+    S->>S: record approval bound to stored token digest (unique, single-use)
+    S->>T: answerCallbackQuery (best effort, after the durable outcome)
+```
 
 The advisory judge is an outbound-only loopback boundary
 ([ADR 0009](adr/0009-local-advisory-judge-audit-projection.md)): the server

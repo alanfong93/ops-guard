@@ -4,6 +4,33 @@ ops-guard exposes its capabilities as MCP tools. This document is the
 authoritative surface specification; each tool links to the contract that
 defines its semantics.
 
+## Transport and authentication
+
+`python -m ops_guard` serves the tool surface over MCP Streamable HTTP with
+native Uvicorn TLS at the configured LAN endpoint ([ADR 0006](adr/0006-lan-mcp-transport.md)):
+
+- **Endpoint** — `https://<bind-host>:<port>/mcp` (Streamable HTTP). The
+  operator provisions a certificate whose SAN matches the client URL and
+  configures client trust; an invalid or missing certificate/key pair
+  prevents startup.
+- **Authentication** — a static high-entropy bearer token from
+  `OPS_GUARD_HTTP_BEARER_TOKEN` (≥ 32 characters), compared in constant
+  time by a custom FastMCP `TokenVerifier` (`src/ops_guard/service.py`).
+  Missing, wrong, or absent tokens are rejected before any tool executes.
+  The token is transport authentication only — it is not proposal-bound
+  approval or execution authorization.
+- **Host/Origin protection** — FastMCP `host_origin_protection` runs in
+  strict mode with the `OPS_GUARD_ALLOWED_HOSTS` and
+  `OPS_GUARD_ALLOWED_ORIGINS` allowlists. A disallowed Host header (HTTP
+  421) or Origin header (HTTP 403) is rejected before the MCP endpoint.
+- **Fail-closed recording boundary** — as with the tool contract below,
+  every rejection happens before any result is returned: no rejected
+  request can obtain a result, logged or unlogged.
+- **Configuration** — all environment variables from
+  [ADR 0006's environment contract](adr/0006-lan-mcp-transport.md) are
+  required; a missing, empty, or invalid value exits before a listener
+  opens, naming the variable and never a secret value.
+
 ## Tools
 
 ### `search_runbook`

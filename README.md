@@ -6,9 +6,13 @@ Cited answers from operator-verified runbooks. Standing authorization for permit
 
 It works with any MCP-speaking host: OpenCode, OpenClaw, Hermes Agent, and anything else that adopts the protocol. Alan's self-hosted systems are the initial deployment; shared-operator and multi-tenant authorization are outside this project's boundary.
 
-**Status: project definition complete. Nothing is built yet.**
+**Status: runnable.** Cited retrieval is served over LAN HTTPS by `python -m ops_guard`; the execution gate, approval boundary, and audit pairing are implemented and demonstrated (see below). Proposal/judge/execution MCP surfaces are not yet exposed.
 
 ---
+
+## Running the service
+
+`python -m ops_guard` serves `search_runbook` — and only that tool — over FastMCP Streamable HTTP with native Uvicorn TLS at the configured LAN endpoint, behind a static bearer token compared in constant time and explicit Host/Origin allowlists. Startup is fail-closed over the environment contract (bearer token, proposal/audit keys, database path, runbook directory, bind address, TLS certificate/key, Host/Origin allowlists); crash reconciliation completes before the listener opens. Full contract: [ADR 0006](docs/adr/0006-lan-mcp-transport.md) and [the API reference](docs/API_Reference.md). The bearer token is transport authentication, not execution authorization.
 
 ## The problem
 

@@ -28,9 +28,17 @@ bearer token compared in constant time, explicit Host/Origin allowlists,
 and fail-closed startup over the environment contract, runbook directory,
 certificate pair, and crash reconciliation. The bearer token is transport
 authentication, not authorization; it never substitutes for standing
-authorization or proposal-bound approval. The LAN listener carries only the
-retrieval tool; proposal, judge, approval, and execution surfaces arrive in
-later stages.
+authorization or proposal-bound approval. The LAN listener carries the
+retrieval tool and the host-composed proposal tool; judging, approval, and
+execution surfaces arrive in later stages.
+
+The advisory judge is an outbound-only loopback boundary
+([ADR 0009](adr/0009-local-advisory-judge-audit-projection.md)): the server
+process calls the local Ollama HTTP API on a literal loopback address
+(`127.0.0.1:11434`) through the pinned local-judge library — proxy
+environment variables are ignored and redirects are never followed, so
+judge traffic cannot leave the machine. Only the closed, versioned
+projection is persisted; the raw trace never reaches the audit log.
 
 The audit record is append-only operational history. It is not a tamper-evident ledger and does not itself protect against storage-level deletion; deployments needing that assurance must retain audit records independently.
 
@@ -108,7 +116,7 @@ erDiagram
         string invocation_digest
         string evidence_refs "JSON array of cited references"
         string authorization_path
-        string judge_snapshot "redacted, when present"
+        string judge_snapshot "redacted, when present; closed advisory projection only"
         string payload "redacted canonical JSON"
         string outcome "success, failure, unknown, or refused"
         string failure_code

@@ -40,6 +40,17 @@ def corpus_library() -> RunbookLibrary:
     return library
 
 
+def hermetic_judge(audit):
+    """A LocalJudge over a fake transport: fixed profile, no live Ollama."""
+    from ops_guard.judge import LocalJudge
+    from test_judge import FakeTransport
+
+    return LocalJudge(
+        transport=FakeTransport(outputs=['"routine"', '"routine"', '"routine"']),
+        fingerprint=audit.fingerprint,
+    )
+
+
 def cited_revision() -> dict:
     with open(N8N_UPDATE, encoding="utf-8") as handle:
         return json.load(handle)
@@ -87,6 +98,7 @@ class Harness:
             self.audit,
             proposals=self.service,
             proposal_ttl=ttl,
+            judge=hermetic_judge(self.audit),
         )
 
     def call(self, arguments: dict):
@@ -315,3 +327,56 @@ def test_arguments_are_not_evidence_bound_and_still_mint(tmp_path) -> None:
     result = harness.call({"invocation": invocation, "citation": citation_for()})
     assert json.loads(result.content[0].text)["token"]
     assert len(harness.proposal_rows()) == 1
+
+def test_proposal_event_carries_closed_judge_projection(harness) -> None:
+    harness.call({"invocation": valid_invocation(), "citation": citation_for()})
+    events = harness.proposal_events()
+    assert len(events) == 1
+    snapshot = events[0].judge_snapshot
+    assert snapshot is not None
+    assert snapshot["schema_version"] == "ops-guard-risk-projection-v1"
+    assert snapshot["status"] == "answered"
+    assert snapshot["risk_class"] == "routine"
+    assert set(snapshot["menu"]) == {"routine", "review", "critical"}
+    # The response shape is unchanged (S7-1) and the judgment is not in it.
+    result = harness.call({"invocation": valid_invocation(), "citation": citation_for()})
+    payload = json.loads(result.content[0].text)
+    assert set(payload) == {"proposal_id", "token", "invocation_digest", "expires_at"}
+    assert "judge" not in json.dumps(payload).lower()
+
+
+def test_judge_typed_failure_still_creates_the_proposal(harness) -> None:
+    def failing(state):
+        return {
+            "schema_version": "ops-guard-risk-projection-v1",
+            "status": "judge_timeout",
+            "trace_id": None,
+        }
+
+    harness.server_absent = None  # no-op guard for clarity
+    from ops_guard.judge import LocalJudge
+
+    original = harness.server
+    # Rebuild the harness server with a judge that always reports a failure.
+    from ops_guard.retrieval import build_mcp_server as build
+
+    class FailingJudge:
+        def evaluate_risk(self, state):
+            return failing(state)
+
+        def evaluate_question_map(self, state, question_ids):
+            return {qid: failing(state) for qid in question_ids}
+
+    harness.server = build(
+        harness.library,
+        harness.audit,
+        proposals=harness.service,
+        proposal_ttl=DEFAULT_TTL,
+        judge=FailingJudge(),
+    )
+    result = harness.call({"invocation": valid_invocation(), "citation": citation_for()})
+    payload = json.loads(result.content[0].text)
+    assert payload["token"]  # proposal still created
+    events = harness.proposal_events()
+    assert events[-1].judge_snapshot["status"] == "judge_timeout"
+    assert original is not None

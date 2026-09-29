@@ -43,6 +43,8 @@ from ops_guard.runbooks import (
 
 if TYPE_CHECKING:
     from ops_guard.audit import AuditLog
+    from ops_guard.judge import LocalJudge
+    from ops_guard.proposals import ProposalService
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
@@ -217,6 +219,7 @@ def build_mcp_server(
     auth: "AuthProvider | None" = None,
     proposals: "ProposalService | None" = None,
     proposal_ttl: "timedelta | None" = None,
+    judge: "LocalJudge | None" = None,
 ) -> FastMCP:
     """MCP server exposing ``search_runbook`` — and, when a proposal service
     is wired (issue #57), ``propose_fix``.
@@ -227,6 +230,9 @@ def build_mcp_server(
     a FastMCP auth provider (issue #54 wires a static bearer verifier).
     ``proposals``/``proposal_ttl`` add the host-composed proposal tool on
     this same server and database — never a second server or store.
+    ``judge`` (issue #58) is required whenever ``proposals`` is wired: the
+    propose_fix path always records an advisory result or typed failure on
+    the proposal audit event.
     """
     server: FastMCP = FastMCP("ops-guard-retrieval", auth=auth)
 
@@ -235,7 +241,14 @@ def build_mcp_server(
 
         if proposal_ttl is None:
             proposal_ttl = timedelta(minutes=15)
-        register_propose_fix(server, library=library, proposals=proposals, ttl=proposal_ttl)
+        if judge is None:
+            raise ValueError(
+                "a judge must be wired with the proposal service: every "
+                "propose_fix call records an advisory result or typed failure"
+            )
+        register_propose_fix(
+            server, library=library, proposals=proposals, ttl=proposal_ttl, judge=judge
+        )
 
     @server.tool
     def search_runbook(

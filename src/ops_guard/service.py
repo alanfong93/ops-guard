@@ -25,6 +25,7 @@ from datetime import timedelta
 from typing import Mapping
 
 from fastmcp.server.auth import AccessToken, TokenVerifier
+from local_judge.ollama import UrllibOllamaTransport
 
 from ops_guard.audit import AuditLog, AuditStore
 from ops_guard.proposal_tool import DEFAULT_PROPOSAL_TTL_SECONDS
@@ -260,12 +261,16 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog]:
     )
 
     verifier = StaticBearerVerifier(config.bearer_token)
+    from ops_guard.judge import LocalJudge
+
+    judge = LocalJudge(transport=UrllibOllamaTransport(), fingerprint=audit.fingerprint)
     server = build_mcp_server(
         library,
         audit,
         auth=verifier,
         proposals=proposals,
         proposal_ttl=timedelta(seconds=config.proposal_ttl_seconds),
+        judge=judge,
     )
     tls_context = validate_tls_pair(config.tls_certfile, config.tls_keyfile)
     app = server.http_app(

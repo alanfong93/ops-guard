@@ -124,6 +124,19 @@ top-level inputs; extra fields are rejected.
   failure. Comparing the proposal and execution audit references makes any
   locator difference visible.
 
+- **Advisory judgment (audit-only)** — every `propose_fix` call also records
+  a local risk judgment on the proposal audit event
+  ([ADR 0009](adr/0009-local-advisory-judge-audit-projection.md)): a closed
+  `ops-guard-risk-projection-v1` projection (risk class from the fixed
+  `routine`/`review`/`critical` menu, vote share, repeated-sample agreement,
+  versions, fixed inference settings, model/trace identity, citation
+  references, request fingerprint) or one closed typed failure
+  (`judge_unavailable`, `judge_timeout`, `judge_inability`,
+  `judge_invalid_output`, `judge_input_rejected`, `judge_error`). The
+  judgment is **not returned in this response** and never influences
+  proposal issuance, authorization, or execution. A judge failure never
+  blocks proposal creation.
+
 ### Search recording
 
 For every valid `search_runbook` call, before any result is returned, two

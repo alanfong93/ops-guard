@@ -311,11 +311,23 @@ class ApprovalNotifier:
                 return tuple(event.evidence_refs)
         return ()
 
+    def binding_for(self, proposal_id: str):
+        with self._service.store.read() as conn:
+            return self._service.fetch_binding_on(conn, proposal_id)
+
     def deliver(self, frozen: FrozenProposal) -> bool:
         """Send the complete preview; True when every part plus the button
         succeeded. A failed part leaves no actionable button behind."""
         refs = self.evidence_refs_for(frozen.proposal_id)
         parts = build_preview_parts(frozen, refs)
+        binding = self.binding_for(frozen.proposal_id)
+        if binding:
+            document = binding["document"]
+            parts[-1] += (
+                "\nScript: " + document["script_path"]
+                + " (sha256 " + document["script_sha256"][:16] + "..."
+                + ", runner " + document["runner_profile_id"] + ")"
+            )
         keyboard = {
             "inline_keyboard": [
                 [{"text": "Approve", "callback_data": callback_data_for(frozen.proposal_id)}]

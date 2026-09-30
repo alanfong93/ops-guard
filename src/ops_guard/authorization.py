@@ -29,6 +29,7 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _FIELDS = (
     "script_path", "script_sha256", "action", "target",
     "arguments", "preconditions", "runbook_revision_hash",
+    "runner_profile_digest",
 )
 
 
@@ -46,6 +47,7 @@ class StandingAuthorization:
     arguments: Mapping[str, Any]
     preconditions: tuple[dict, ...]
     runbook_revision_hash: str
+    runner_profile_digest: str = ""
 
     def canonical_arguments(self) -> bytes:
         return canonicalize_json(dict(self.arguments))
@@ -91,6 +93,11 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
         raise MalformedAuthorizationError("script_sha256 must be 64 hexadecimal characters")
     if not _HEX64.fullmatch(strings["runbook_revision_hash"]):
         raise MalformedAuthorizationError("runbook_revision_hash must be 64 hexadecimal characters")
+    runner_profile_digest = document.get("runner_profile_digest")
+    if not isinstance(runner_profile_digest, str) or not _HEX64.fullmatch(runner_profile_digest):
+        raise MalformedAuthorizationError(
+            "runner_profile_digest must be 64 hexadecimal characters (ADR 0012)"
+        )
     arguments = document.get("arguments")
     if not isinstance(arguments, Mapping):
         raise MalformedAuthorizationError("arguments must be a mapping")
@@ -141,6 +148,7 @@ def parse_authorization(document: Mapping) -> StandingAuthorization:
         arguments=dict(arguments),
         preconditions=tuple(preconditions),
         runbook_revision_hash=strings["runbook_revision_hash"],
+        runner_profile_digest=runner_profile_digest,
     )
 
 
@@ -148,6 +156,8 @@ def match(
     authorization: StandingAuthorization,
     invocation: Invocation,
     script: ScriptIdentity,
+    *,
+    runner_profile_digest: str | None = None,
 ) -> MatchResult:
     """All-or-nothing equality between the declared permitted invocation and
     the frozen invocation plus the presented script identity (ADR 0004)."""
@@ -188,6 +198,11 @@ def match(
         (
             "runbook_revision_hash",
             hmac_eq(invocation.runbook_revision_hash, authorization.runbook_revision_hash),
+        ),
+        (
+            "runner_profile_digest",
+            runner_profile_digest is None
+            or hmac_eq(runner_profile_digest, authorization.runner_profile_digest),
         ),
     )
     for field, equal in checks:

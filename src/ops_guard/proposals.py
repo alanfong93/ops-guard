@@ -13,6 +13,7 @@ happens before any execution or side effect.
 from __future__ import annotations
 
 import hashlib
+import json
 import hmac
 import secrets
 import sqlite3
@@ -128,7 +129,11 @@ class ProposalService:
         ttl: timedelta,
         evidence_refs: Sequence[str] = (),
         judge_snapshot: Mapping | None = None,
+        execution_binding: Any | None = None,
     ) -> IssuedProposal:
+        """``execution_binding`` (issue #64; ADR 0012) persists the immutable
+        server-resolved binding in the same transaction — a resolution or
+        persistence failure creates no proposal and no token."""
         """Freeze the invocation, mint a 256-bit token, fix the absolute expiry.
 
         ``evidence_refs`` (issue #57) records the proposal-time citation as
@@ -165,6 +170,24 @@ class ProposalService:
             # Same transaction as the insert (issue #40): a proposal never
             # exists without its audit event, and a failed append rolls the
             # creation back — no proposal row, no token returned.
+            if execution_binding is not None:
+                finalized = (
+                    execution_binding.finalize(proposal_id, digest)
+                    if hasattr(execution_binding, "finalize")
+                    else execution_binding
+                )
+                document = finalized.to_document()
+                conn.execute(
+                    """
+                    INSERT INTO execution_bindings (proposal_id, binding_digest, document)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        proposal_id,
+                        finalized.digest(),
+                        json.dumps(document, sort_keys=True),
+                    ),
+                )
             self._audit.append_on(
                 conn,
                 "proposal",
@@ -214,6 +237,17 @@ class ProposalService:
         ).fetchone()
         self._check(row, digest, expected_digest, self._now())
         return _row_to_proposal(row)
+
+    def fetch_binding_on(self, conn: sqlite3.Connection, proposal_id: str):
+        """Load the execution-binding document for a proposal, or None when
+        the proposal predates ADR 0012 (legacy proposals never dispatch)."""
+        row = conn.execute(
+            "SELECT binding_digest, document FROM execution_bindings WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"digest": row["binding_digest"], "document": json.loads(row["document"])}
 
     def fetch_by_id_on(self, conn: sqlite3.Connection, proposal_id: str) -> FrozenProposal:
         """Load a frozen proposal by id inside a caller-owned transaction

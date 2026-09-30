@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS proposals (
     state             TEXT NOT NULL CHECK (state IN ('active', 'consumed')),
     consumed_at       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS execution_bindings (
+    proposal_id            TEXT PRIMARY KEY,
+    binding_digest         TEXT NOT NULL,
+    document               TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_proposals_invocation_digest
     ON proposals (invocation_digest);
 """

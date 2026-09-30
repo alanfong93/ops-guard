@@ -30,6 +30,7 @@ from local_judge.ollama import UrllibOllamaTransport
 
 from ops_guard.audit import AuditLog, AuditStore
 from ops_guard.errors import ProposalError
+from ops_guard.gate import ExecutionGate
 from ops_guard.proposal_tool import DEFAULT_PROPOSAL_TTL_SECONDS
 from ops_guard.telegram_approval import ApprovalConfigError
 from ops_guard.proposals import ProposalService, default_clock
@@ -223,7 +224,14 @@ def load_runbook_documents(
     return documents, rejections
 
 
-def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog]:
+def _operator_script_source(path: str) -> bytes:
+    """The operator's authoritative script source (ADR 0004/0012): whatever
+    this returns for a path IS the artifact that path names."""
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog, ProposalService]:
     """Assemble the service: runbooks, audit/proposal initialization on the
     shared database, crash reconciliation, then the retrieval-only MCP app
     behind bearer auth and Host/Origin protection. Nothing binds here."""
@@ -264,9 +272,46 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog]:
     )
 
     verifier = StaticBearerVerifier(config.bearer_token)
+    from ops_guard.approvals import ApprovalStore, ApprovalVerifier
     from ops_guard.judge import LocalJudge
+    from ops_guard.preconditions import default_registry, load_policy_file
 
     judge = LocalJudge(transport=UrllibOllamaTransport(), fingerprint=audit.fingerprint)
+    execution_catalog = None
+    catalog_path = os.environ.get("OPS_GUARD_EXECUTION_CATALOG")
+    if catalog_path:
+        from ops_guard.execution_binding import load_execution_catalog_file
+
+        execution_catalog = load_execution_catalog_file(catalog_path)
+        print(f"[ops-guard] execution catalog loaded from {catalog_path}", flush=True)
+    gate = None
+    if execution_catalog is not None:
+        observer_registry = default_registry()
+        policy_path = os.environ.get("OPS_GUARD_POLICY_FILE")
+        operator_policy = (
+            load_policy_file(policy_path, observer_registry) if policy_path else None
+        )
+        gate = ExecutionGate(
+            proposals,
+            ApprovalVerifier(
+                ApprovalStore(config.db_path),
+                proposals,
+                operator_identity=os.environ.get(
+                    "OPS_GUARD_APPROVAL_OPERATOR_IDENTITY", "operator"
+                ),
+                clock=clock,
+            ),
+            audit,
+            runbooks=library,
+            script_source=_operator_script_source,
+            clock=clock,
+            observer_registry=observer_registry,
+            authorization_catalog=operator_policy,
+            operator_identity=os.environ.get(
+                "OPS_GUARD_APPROVAL_OPERATOR_IDENTITY", "operator"
+            ),
+            execution_catalog=execution_catalog,
+        )
     server = build_mcp_server(
         library,
         audit,
@@ -274,8 +319,10 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog]:
         proposals=proposals,
         proposal_ttl=timedelta(seconds=config.proposal_ttl_seconds),
         judge=judge,
+        execution_catalog=execution_catalog,
+        gate=gate,
     )
-    tls_context = validate_tls_pair(config.tls_certfile, config.tls_keyfile)
+    validate_tls_pair(config.tls_certfile, config.tls_keyfile)
     app = server.http_app(
         transport="streamable-http",
         host_origin_protection=True,
@@ -369,8 +416,7 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
         print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
         return 2
     # Operator policy (issue #62; ADR 0011): validated once per server
-    # start, fail-closed on any error. The execution gate consumes it when
-    # the execute surface is wired (issue #64).
+    # start, fail-closed on any error.
     policy_path = environment.get("OPS_GUARD_POLICY_FILE")
     if policy_path:
         from ops_guard.preconditions import default_registry, load_policy_file
@@ -382,6 +428,11 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
             return 2
         print(
             f"[ops-guard] operator policy loaded (digest {policy.digest[:16]}...)", flush=True
+        )
+    catalog_path = environment.get("OPS_GUARD_EXECUTION_CATALOG")
+    if catalog_path:
+        print(
+            f"[ops-guard] execution catalog loaded from {catalog_path}", flush=True
         )
     if runtime is not None:
         runtime.start()

@@ -13,6 +13,7 @@ as provenance-only `evidence_refs`.
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 from typing import Any, Mapping
 
@@ -20,6 +21,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from ops_guard.errors import ProposalError
+from ops_guard.gate import ExecutionRequest as _GateRequest
 from ops_guard.invocation import Invocation
 from ops_guard.audit import AuditWriteFailure
 from ops_guard.runbooks import (
@@ -72,6 +74,7 @@ def register_propose_fix(
     proposals,
     ttl: timedelta,
     judge,
+    execution_catalog=None,
 ) -> None:
     """Register `propose_fix` on the shared authenticated FastMCP server.
 
@@ -139,9 +142,32 @@ def register_propose_fix(
                 cited_passage=cited,
             )
         )
+        binding = None
+        if execution_catalog is not None:
+            # The server resolves the execution binding (issue #64; ADR 0012)
+            # — the host never names a script. Zero or ambiguous matches
+            # create no proposal and no token.
+            from ops_guard.execution_binding import resolve_binding
+
+            try:
+                binding = resolve_binding(
+                    execution_catalog[0],
+                    execution_catalog[1],
+                    runbook_id=citation.runbook_id,
+                    revision=citation.revision,
+                    content_hash=citation.content_hash,
+                    action=frozen.action,
+                    target=frozen.target,
+                )
+            except ProposalError as error:
+                raise ToolError(f"execution_binding_unresolved: {error}") from error
         try:
             issued = proposals.open_proposal(
-                frozen, ttl=ttl, evidence_refs=citation_ref, judge_snapshot=snapshot
+                frozen,
+                ttl=ttl,
+                evidence_refs=citation_ref,
+                judge_snapshot=snapshot,
+                execution_binding=binding,
             )
         except (ProposalError, AuditWriteFailure, ValueError) as error:
             raise ToolError(f"proposal_write_failed: {error}") from error
@@ -157,3 +183,45 @@ def _build_citation(citation: ProposalCitationInput):
     from ops_guard.runbooks import Citation
 
     return Citation(**citation.model_dump())
+
+def register_execute_fix(server, *, library, gate) -> None:
+    """Register `execute_fix` (issue #64; ADR 0012).
+
+    The host supplies a one-time token and a verified Citation — never a
+    script path, bytes, runner, standing record, operator identity, or
+    observed preconditions. The gate re-resolves the citation against the
+    frozen invocation, verifies the stored execution binding and the
+    catalog/profile/source digests, and dispatches the staged copy."""
+
+    @server.tool
+    def execute_fix(token: str, citation: ProposalCitationInput) -> dict:
+        """Execute the operation frozen in the proposal this token was
+        issued for. Returns the outcome and authorization path; consumes
+        the one-time token atomically with the execution-start record."""
+        from ops_guard.runbooks import (
+            MalformedRunbookError,
+            TamperedRunbookError,
+            UnknownPassageError,
+            UnverifiedRunbookError,
+        )
+
+        try:
+            library.resolve_citation(_build_citation(citation))
+        except (
+            MalformedRunbookError,
+            UnverifiedRunbookError,
+            TamperedRunbookError,
+            UnknownPassageError,
+        ) as error:
+            raise ToolError(f"invalid_citation: {error}") from error
+        outcome = gate.execute(
+            _GateRequest(token=token, citation=_build_citation(citation))
+        )
+        return {
+            "dispatched": outcome.dispatched,
+            "proposal_id": outcome.proposal_id,
+            "authorization_path": outcome.authorization_path,
+            "outcome": outcome.outcome,
+            "refusal": outcome.refusal,
+        }
+

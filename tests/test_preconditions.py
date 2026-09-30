@@ -26,6 +26,7 @@ from ops_guard import (
 )
 from ops_guard.errors import ProposalError
 from ops_guard.gate import ExecutionGate, ExecutionRequest
+from ops_guard.execution_binding import load_execution_catalog
 from ops_guard.preconditions import (
     POLICY_SCHEMA_VERSION,
     ObserverError,
@@ -38,9 +39,14 @@ from ops_guard.retrieval import RunbookLibrary
 from ops_guard.service import ServiceConfig
 from helpers import FakeClock, make_invocation, make_observer_registry, make_policy_document, load_test_policy
 from tests_helpers_runbook import VALID_RUNBOOK
+import hashlib as _hl
+from ops_guard.invocation import canonicalize_json as _cj
+SCRIPT_SHA256 = _hl.sha256(b"#!/bin/sh\necho ok\n").hexdigest()
+
 
 OPERATOR = "alan"
 SCRIPT_PATH = "/opt/scripts/restart-n8n.sh"
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_BYTES = b"#!/bin/sh\necho ok\n"
 
@@ -58,6 +64,9 @@ class Harness:
         )
         self.library, _ = RunbookLibrary.load([VALID_RUNBOOK])
         self.scripts: dict[str, bytes] = {SCRIPT_PATH: SCRIPT_BYTES}
+        from helpers import make_execution_catalog
+
+        self.catalog = make_execution_catalog(VALID_RUNBOOK, SCRIPT_PATH, SCRIPT_SHA256)
         self.registry = make_observer_registry({"static_test": "passing"})
         self.policy = load_test_policy(
             make_policy_document(
@@ -81,16 +90,21 @@ class Harness:
             observer_registry=self.registry,
             authorization_catalog=self.policy,
             operator_identity=OPERATOR,
+            execution_catalog=self.catalog,
         )
 
     def issue(self):
+        from helpers import binding_template
+
         invocation = make_invocation(runbook_revision_hash=VALID_RUNBOOK["content_hash"])
-        return self.service.open_proposal(invocation, ttl=timedelta(minutes=10))
+        template = binding_template(VALID_RUNBOOK, SCRIPT_PATH, SCRIPT_SHA256, invocation)
+        return self.service.open_proposal(
+            invocation, ttl=timedelta(minutes=10), execution_binding=template
+        )
 
     def request(self, token: str) -> ExecutionRequest:
         return ExecutionRequest(
             token=token,
-            script_path=SCRIPT_PATH,
             citation=__import__(
                 "ops_guard", fromlist=["Citation"]
             ).Citation(
@@ -530,6 +544,34 @@ def test_real_corpus_revision_with_docker_observer(tmp_path, monkeypatch) -> Non
     document["observer_bindings"] = bindings
     harness.library, _ = RunbookLibrary.load(list(corpus.values()))
     harness.policy = load_policy(document, harness.registry)
+    harness.catalog = load_execution_catalog(
+        {
+            "schema_version": "ops-guard-execution-catalog-v1",
+            "runner_profile": {
+                "profile_id": "test-runner",
+                "executable": "python3",
+                "executable_sha256": "e" * 64,
+                "argv": ["python3", "-c", "pass"],
+                "working_directory": ".",
+                "env_allowlist": ["PATH"],
+                "timeout_seconds": 10,
+                "output_limit": 65536,
+            },
+            "entries": [
+                {
+                    "runbook_id": revision["runbook_id"],
+                    "revision": revision["revision"],
+                    "content_hash": revision["content_hash"],
+                    "action": "update",
+                    "target": "n8n",
+                    "script_id": f"docker-script-{index}",
+                    "script_path": SCRIPT_PATH,
+                    "script_sha256": SCRIPT_SHA256,
+                }
+                for index, revision in enumerate(corpus.values())
+            ],
+        }
+    )
     harness.gate = harness._gate()
 
     from ops_guard.invocation import Invocation
@@ -543,10 +585,37 @@ def test_real_corpus_revision_with_docker_observer(tmp_path, monkeypatch) -> Non
             preconditions=[dict(item) for item in revision["preconditions"]],
             runbook_revision_hash=revision["content_hash"],
         )
-        issued = harness.service.open_proposal(invocation, ttl=timedelta(minutes=10))
+        from ops_guard.execution_binding import ExecutionBindingTemplate
+
+        from helpers import make_runner_profile
+
+        profile = make_runner_profile()
+        entry_document = {
+            "runbook_id": revision["runbook_id"],
+            "revision": revision["revision"],
+            "content_hash": revision["content_hash"],
+            "action": "update",
+            "target": "n8n",
+            "script_id": "docker-script",
+            "script_path": SCRIPT_PATH,
+            "script_sha256": SCRIPT_SHA256,
+        }
+        template = ExecutionBindingTemplate(
+            runbook_id=revision["runbook_id"],
+            runbook_revision=revision["revision"],
+            runbook_content_hash=revision["content_hash"],
+            script_id="docker-script",
+            script_path=SCRIPT_PATH,
+            script_sha256=SCRIPT_SHA256,
+            catalog_entry_digest=_hl.sha256(_cj(entry_document)).hexdigest(),
+            runner_profile_id=profile.profile_id,
+            runner_profile_digest=profile.digest(),
+        )
+        issued = harness.service.open_proposal(
+            invocation, ttl=timedelta(minutes=10), execution_binding=template
+        )
         request = ExecutionRequest(
             token=issued.token,
-            script_path=SCRIPT_PATH,
             citation=__import__(
                 "ops_guard", fromlist=["Citation"]
             ).Citation(

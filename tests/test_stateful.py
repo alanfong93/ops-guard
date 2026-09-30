@@ -31,7 +31,15 @@ class ProposalLifecycleMachine(RuleBasedStateMachine):
     def open_proposal(self, ttl: int) -> None:
         self.counter += 1
         invocation = make_invocation(arguments={"n": self.counter})
-        issued = self.service.open_proposal(invocation, ttl=timedelta(seconds=ttl))
+        from tests_helpers_runbook import VALID_RUNBOOK as _RB
+        from helpers import binding_template
+
+        template = binding_template(
+            _RB, "/opt/scripts/restart-n8n.sh", "a" * 64, invocation
+        )
+        issued = self.service.open_proposal(
+            invocation, ttl=timedelta(seconds=ttl), execution_binding=template
+        )
         self.tokens[issued.token] = {
             "digest": issued.invocation_digest,
             "expires_at": self.clock.now + timedelta(seconds=ttl),
@@ -198,6 +206,11 @@ def test_recovery_invariants_hold_for_arbitrary_sequences(events: list, sweeps: 
 
     from ops_guard import Citation, ExecutionOwner
     from tests_helpers_runbook import VALID_RUNBOOK as RB
+    import hashlib as _hl
+
+    from helpers import binding_template as _bt
+
+    _script_hash = _hl.sha256(b"#!/bin/sh\n").hexdigest()
 
     citation = Citation(
         runbook_id=RB["runbook_id"],
@@ -210,13 +223,15 @@ def test_recovery_invariants_hold_for_arbitrary_sequences(events: list, sweeps: 
         if event in ("dead", "live", "indeterminate"):
             owner = ExecutionOwner(os.path.join(path + ".owners"))
         gate = _recovery_gate(path, clock, service, verifier, audit, owner)
+        template = _bt(RB, "/opt/scripts/restart-n8n.sh", _script_hash, _mk(runbook_revision_hash=RB["content_hash"]))
         issued = service.open_proposal(
-            _mk(runbook_revision_hash=RB["content_hash"]), ttl=timedelta(minutes=5)
+            _mk(runbook_revision_hash=RB["content_hash"]),
+            ttl=timedelta(minutes=5),
+            execution_binding=template,
         )
         verifier.record_approval(issued.token, operator_identity="alan")
         request = ExecutionRequest(
             token=issued.token,
-            script_path="/opt/scripts/restart-n8n.sh",
             citation=citation,
         )
 

@@ -10,7 +10,11 @@ import pytest
 
 from ops_guard import TokenAlreadyConsumedError, UnknownTokenError
 from ops_guard.store import ProposalStore
-from helpers import make_invocation, make_service
+from helpers import make_invocation, make_service, binding_template, make_execution_catalog
+from tests_helpers_runbook import VALID_RUNBOOK
+import hashlib as _hl
+
+_SCRIPT_HASH = _hl.sha256(b'#!/bin/sh\n').hexdigest()
 
 PROBE_SCHEMA = "CREATE TABLE IF NOT EXISTS audit_probe (id INTEGER PRIMARY KEY, note TEXT)"
 
@@ -58,7 +62,7 @@ def test_crash_during_open_leaves_no_proposal(db_path, token_key, clock) -> None
 
 def test_callback_cannot_commit_the_consume_transaction(db_path, token_key, clock) -> None:
     service = make_service(db_path, token_key=token_key, clock=clock)
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = service.open_proposal(make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash']), ttl=timedelta(minutes=5), execution_binding=binding_template(VALID_RUNBOOK, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash'])))
 
     def committing_callback(conn, _consumed_digest: str) -> None:
         conn.execute(
@@ -80,7 +84,7 @@ def test_callback_cannot_commit_the_consume_transaction(db_path, token_key, cloc
 
 def test_callback_cannot_send_transaction_control_sql(db_path, token_key, clock) -> None:
     service = make_service(db_path, token_key=token_key, clock=clock)
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = service.open_proposal(make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash']), ttl=timedelta(minutes=5), execution_binding=binding_template(VALID_RUNBOOK, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash'])))
     attempts = [
         "COMMIT",
         "  commit;",
@@ -114,7 +118,7 @@ def test_callback_cannot_send_transaction_control_sql(db_path, token_key, clock)
 def test_comment_rollback_and_rebegin_chain_is_blocked(db_path, token_key, clock) -> None:
     """The cycle-3 silent-defeat chain: comment ROLLBACK, comment BEGIN, INSERT."""
     service = make_service(db_path, token_key=token_key, clock=clock)
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = service.open_proposal(make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash']), ttl=timedelta(minutes=5), execution_binding=binding_template(VALID_RUNBOOK, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash'])))
 
     def evasive_callback(conn, _consumed_digest: str) -> None:
         conn.execute("-- undo\nROLLBACK")
@@ -142,7 +146,7 @@ def test_comment_rollback_and_rebegin_chain_is_blocked(db_path, token_key, clock
 def test_obscured_keyword_forms_are_rejected(db_path, token_key, clock) -> None:
     """BOM / control-char prefixes and quote-glued keywords fail closed."""
     service = make_service(db_path, token_key=token_key, clock=clock)
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = service.open_proposal(make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash']), ttl=timedelta(minutes=5), execution_binding=binding_template(VALID_RUNBOOK, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash'])))
     obscured = [
         "\ufeffROLLBACK",  # SQLite skips a leading BOM; the filter must not
         "\ufeffCOMMIT",
@@ -166,7 +170,7 @@ def test_obscured_keyword_forms_are_rejected(db_path, token_key, clock) -> None:
 
 def test_guarded_cursor_hides_the_real_connection(db_path, token_key, clock) -> None:
     service = make_service(db_path, token_key=token_key, clock=clock)
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = service.open_proposal(make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash']), ttl=timedelta(minutes=5), execution_binding=binding_template(VALID_RUNBOOK, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash'])))
     observed = {}
 
     def probing_callback(conn, _consumed_digest: str) -> None:
@@ -219,7 +223,7 @@ def test_consume_rolls_back_when_audit_append_fails(db_path, token_key, clock) -
     conn.execute(PROBE_SCHEMA)
     conn.commit()
     conn.close()
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = service.open_proposal(make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash']), ttl=timedelta(minutes=5), execution_binding=binding_template(VALID_RUNBOOK, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash'])))
 
     def failing_append(conn: sqlite3.Connection, _consumed_digest: str) -> None:
         conn.execute("INSERT INTO audit_probe (note) VALUES ('should-not-persist')")
@@ -240,7 +244,7 @@ def test_consume_rolls_back_when_audit_append_fails(db_path, token_key, clock) -
 
 def test_consume_and_audit_append_commit_atomically(db_path, token_key, clock) -> None:
     service = make_service(db_path, token_key=token_key, clock=clock)
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = service.open_proposal(make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash']), ttl=timedelta(minutes=5), execution_binding=binding_template(VALID_RUNBOOK, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation(runbook_revision_hash=VALID_RUNBOOK['content_hash'])))
     conn = sqlite3.connect(db_path)
     conn.execute(PROBE_SCHEMA)
     conn.commit()
@@ -305,6 +309,9 @@ def _recovery_wiring(db_path, token_key, clock, owner):
         ),
         registry,
     )
+    catalog = make_execution_catalog(
+        VALID_RUNBOOK, "/opt/scripts/restart-n8n.sh", _SCRIPT_HASH
+    )
     gate = ExecutionGate(
         service,
         verifier,
@@ -315,6 +322,7 @@ def _recovery_wiring(db_path, token_key, clock, owner):
         observer_registry=registry,
         authorization_catalog=policy,
         operator_identity="alan",
+        execution_catalog=catalog,
         owner=owner,
     )
     citation = Citation(
@@ -336,6 +344,7 @@ def _dispatch_crash(audit, verifier, gate, service, citation):
     issued = service.open_proposal(
         make_invocation(runbook_revision_hash=_RB["content_hash"]),
         ttl=timedelta(minutes=5),
+        execution_binding=binding_template(_RB, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation()),
     )
     verifier.record_approval(issued.token, operator_identity="alan")
     real = audit.append_on
@@ -349,7 +358,6 @@ def _dispatch_crash(audit, verifier, gate, service, citation):
     try:
         request = ExecutionRequest(
             token=issued.token,
-            script_path="/opt/scripts/restart-n8n.sh",
             citation=citation,
         )
         gate.execute(request, lambda invocation, script_bytes: "success")
@@ -445,13 +453,13 @@ def test_recovery_never_touches_a_terminal_outcome(db_path, token_key, clock) ->
     issued = service.open_proposal(
         make_invocation(runbook_revision_hash=_RB["content_hash"]),
         ttl=timedelta(minutes=5),
+        execution_binding=binding_template(_RB, '/opt/scripts/restart-n8n.sh', _SCRIPT_HASH, make_invocation()),
     )
     verifier.record_approval(issued.token, operator_identity="alan")
     from ops_guard import Citation, ExecutionRequest
 
     request = ExecutionRequest(
         token=issued.token,
-        script_path="/opt/scripts/restart-n8n.sh",
         citation=Citation(
             runbook_id=_RB["runbook_id"],
             revision=_RB["revision"],

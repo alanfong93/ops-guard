@@ -35,6 +35,7 @@ from ops_guard.preconditions import (
     policy_digest,
 )
 from ops_guard.retrieval import RunbookLibrary
+from ops_guard.service import ServiceConfig
 from helpers import FakeClock, make_invocation, make_observer_registry, make_policy_document, load_test_policy
 from tests_helpers_runbook import VALID_RUNBOOK
 
@@ -243,7 +244,10 @@ def test_observer_timeout_refuses(tmp_path) -> None:
 
     harness = Harness(tmp_path)
     harness.registry.register(
-        "slow", lambda settings: time_module.sleep(5) or "passing", lambda s: None
+        "slow",
+        lambda settings: time_module.sleep(5) or "passing",
+        lambda s: None,
+        timeout_getter=lambda s: float(s["timeout_seconds"]),
     )
     document = make_policy_document(
         runbook_id=VALID_RUNBOOK["runbook_id"],
@@ -316,3 +320,254 @@ def test_observation_returns_exactly_the_adapter_value(value: str) -> None:
     assert observation.value == value
     # exact comparison: anything but the expected string is a mismatch
     assert (observation.value == "passing") == (value == "passing")
+
+# ---- pass-1 review fixes (refusal provenance, liveness, startup) --------
+
+
+@pytest.mark.parametrize(
+    ("mutation", "code"),
+    [
+        ("missing-observation", "precondition-unmapped"),
+        ("wrong-observation", "precondition-mismatch"),
+    ],
+)
+def test_precondition_refusals_carry_safe_provenance(tmp_path, mutation, code) -> None:
+    harness = Harness(tmp_path)
+    issued = harness.issue()
+    if mutation == "wrong-observation":
+        harness.registry._test_state["value"] = "failing"
+    else:
+        harness.policy = load_test_policy(
+            make_policy_document(
+                runbook_id=VALID_RUNBOOK["runbook_id"],
+                revision=VALID_RUNBOOK["revision"],
+                content_hash=VALID_RUNBOOK["content_hash"],
+                bindings=False,
+            ),
+            harness.registry,
+        )
+        harness.gate = harness._gate()
+    outcome = harness.gate.execute(harness.request(issued.token), lambda i, s: "success")
+    assert not outcome.dispatched
+    refusals = [e for e in harness.audit.events() if e.event_type == "refusal"]
+    payload = refusals[-1].payload
+    assert payload["failure_code"] == code
+    observation = payload["observation"]
+    assert observation["runbook_id"] == VALID_RUNBOOK["runbook_id"]
+    assert observation["precondition_index"] == 0
+    assert observation["policy_digest"] == harness.policy.digest
+    assert observation["outcome"] == ("mismatch" if code == "precondition-mismatch" else "unmapped")
+    assert "value" not in observation  # raw observed value never persisted
+
+
+def test_timeout_refusal_records_code_and_provenance(tmp_path) -> None:
+    import time as time_module
+
+    harness = Harness(tmp_path)
+    harness.registry.register(
+        "slow",
+        lambda settings: time_module.sleep(5) or "passing",
+        lambda s: None,
+        timeout_getter=lambda s: float(s["timeout_seconds"]),
+    )
+    document = make_policy_document(
+        runbook_id=VALID_RUNBOOK["runbook_id"],
+        revision=VALID_RUNBOOK["revision"],
+        content_hash=VALID_RUNBOOK["content_hash"],
+    )
+    document["observer_bindings"][0]["observer_id"] = "slow"
+    document["observer_bindings"][0]["settings"] = {"timeout_seconds": 1}
+    harness.policy = load_policy(document, harness.registry)
+    harness.gate = harness._gate()
+    issued = harness.issue()
+    outcome = harness.gate.execute(harness.request(issued.token), lambda i, s: "success")
+    assert not outcome.dispatched
+    refusals = [e for e in harness.audit.events() if e.event_type == "refusal"]
+    assert refusals[-1].payload["failure_code"] == "precondition-timeout"
+    assert refusals[-1].payload["observation"]["observer_id"] == "slow"
+    frozen = harness.service.resolve(issued.token)
+    assert not frozen.consumed
+
+
+def test_timed_out_worker_does_not_block_the_gate(tmp_path) -> None:
+    """Liveness: execute returns promptly even when the adapter would sleep
+    far past its timeout; the late result is discarded."""
+    import time as time_module
+
+    harness = Harness(tmp_path)
+    harness.registry.register(
+        "slow",
+        lambda settings: time_module.sleep(30) or "passing",
+        lambda s: None,
+        timeout_getter=lambda s: float(s["timeout_seconds"]),
+    )
+    document = make_policy_document(
+        runbook_id=VALID_RUNBOOK["runbook_id"],
+        revision=VALID_RUNBOOK["revision"],
+        content_hash=VALID_RUNBOOK["content_hash"],
+    )
+    document["observer_bindings"][0]["observer_id"] = "slow"
+    document["observer_bindings"][0]["settings"] = {"timeout_seconds": 1}
+    harness.policy = load_policy(document, harness.registry)
+    harness.gate = harness._gate()
+    issued = harness.issue()
+    started = time_module.monotonic()
+    outcome = harness.gate.execute(harness.request(issued.token), lambda i, s: "success")
+    elapsed = time_module.monotonic() - started
+    assert not outcome.dispatched
+    assert elapsed < 5, f"gate blocked {elapsed:.1f}s past the timeout"
+
+
+def test_proposal_error_from_adapter_becomes_typed_refusal(tmp_path) -> None:
+    """A ProposalError escaping an adapter must still be audited as a typed
+    refusal, never propagate unaudited with its message text."""
+    harness = Harness(tmp_path)
+
+    def raising(settings):
+        raise PolicyError("secret-ish detail")
+
+    harness.registry.register("raising", raising, lambda s: None)
+    document = make_policy_document(
+        runbook_id=VALID_RUNBOOK["runbook_id"],
+        revision=VALID_RUNBOOK["revision"],
+        content_hash=VALID_RUNBOOK["content_hash"],
+    )
+    document["observer_bindings"][0]["observer_id"] = "raising"
+    harness.policy = load_policy(document, harness.registry)
+    harness.gate = harness._gate()
+    issued = harness.issue()
+    outcome = harness.gate.execute(harness.request(issued.token), lambda i, s: "success")
+    assert not outcome.dispatched
+    refusals = [e for e in harness.audit.events() if e.event_type == "refusal"]
+    assert refusals, "the failed check must be audit-recorded"
+    assert "secret-ish detail" not in refusals[-1].payload["reason"]
+
+
+def test_docker_engine_running_adapter_branches(monkeypatch) -> None:
+    import subprocess as sp
+
+    from ops_guard.preconditions import _docker_engine_running
+
+    class Completed:
+        def __init__(self, returncode, stdout):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Completed(0, "27.0.1"))
+    assert _docker_engine_running({"timeout_seconds": 2}) == "running"
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Completed(1, ""))
+    assert _docker_engine_running({"timeout_seconds": 2}) == "stopped"
+
+    def timeout_out(*a, **k):
+        raise sp.TimeoutExpired(cmd="docker", timeout=2)
+
+    monkeypatch.setattr(sp, "run", timeout_out)
+    assert _docker_engine_running({"timeout_seconds": 2}) == "stopped"
+
+    def no_engine(*a, **k):
+        raise OSError("no docker binary")
+
+    monkeypatch.setattr(sp, "run", no_engine)
+    assert _docker_engine_running({"timeout_seconds": 2}) == "stopped"
+
+
+def test_real_corpus_revision_with_docker_observer(tmp_path, monkeypatch) -> None:
+    """The shipped #55 revision binds to the real docker observer: a running
+    engine dispatches; a stopped engine refuses before consumption."""
+    import subprocess as sp
+    from ops_guard.preconditions import (
+        _docker_engine_running,
+        _validate_timeout_seconds,
+    )
+
+    harness = Harness(tmp_path)
+    harness.registry.register(
+        "docker_engine_running",
+        _docker_engine_running,
+        _validate_timeout_seconds,
+        timeout_getter=lambda s: float(s["timeout_seconds"]),
+    )
+    harness.policy = load_test_policy(
+        make_policy_document(
+            runbook_id=VALID_RUNBOOK["runbook_id"],
+            revision=VALID_RUNBOOK["revision"],
+            content_hash=VALID_RUNBOOK["content_hash"],
+        ),
+        harness.registry,
+    )
+    harness.gate = harness._gate()
+
+    class Completed:
+        def __init__(self, returncode, stdout):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Completed(0, "27.0.1"))
+    issued = harness.issue()
+    harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    outcome = harness.gate.execute(harness.request(issued.token), lambda i, s: "success")
+    assert outcome.dispatched
+
+    issued2 = harness.issue()
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Completed(1, ""))
+    outcome = harness.gate.execute(harness.request(issued2.token), lambda i, s: "success")
+    assert not outcome.dispatched
+    frozen = harness.service.resolve(issued2.token)
+    assert not frozen.consumed
+
+
+def test_policy_file_startup_fail_closed(tmp_path, monkeypatch) -> None:
+    """main() exits 2 on a missing/malformed policy file before a listener."""
+    import ops_guard.service as service_module
+
+    config = ServiceConfig(
+        bearer_token="x" * 40,
+        proposal_token_key=b"\xaa" * 32,
+        audit_fingerprint_key=b"\xbb" * 32,
+        db_path=str(tmp_path / "db.sqlite3"),
+        runbook_dir=str(tmp_path),
+        bind_host="127.0.0.1",
+        port=1,
+        tls_certfile="c",
+        tls_keyfile="k",
+        allowed_hosts=("localhost",),
+        allowed_origins=("https://x",),
+        proposal_ttl_seconds=900,
+    )
+    monkeypatch.setattr(service_module, "load_config", lambda env: config)
+    monkeypatch.setattr(
+        service_module, "build_http_server", lambda cfg: (object(), None, None)
+    )
+
+    missing = str(tmp_path / "absent-policy.json")
+    code = service_module.main(environ={"OPS_GUARD_POLICY_FILE": missing})
+    assert code == 2
+
+    malformed = tmp_path / "bad-policy.json"
+    malformed.write_text('{"schema_version": "ops-guard-policy-v1"}', encoding="utf-8")
+    code = service_module.main(environ={"OPS_GUARD_POLICY_FILE": str(malformed)})
+    assert code == 2
+
+
+def test_policy_file_rejects_duplicate_json_keys(tmp_path) -> None:
+    from ops_guard.preconditions import PolicyError, default_registry, load_policy_file
+
+    path = tmp_path / "policy.json"
+    path.write_text(
+        '{"schema_version": "ops-guard-policy-v1", "schema_version": "ops-guard-policy-v1",'
+        ' "standing_authorizations": [], "observer_bindings": []}',
+        encoding="utf-8",
+    )
+    with pytest.raises(PolicyError, match="duplicate JSON key"):
+        load_policy_file(str(path), default_registry())
+
+
+def test_policy_settings_are_frozen_against_source_mutation() -> None:
+    document = make_policy_document(
+        runbook_id="r", revision="v", content_hash="a" * 64
+    )
+    registry = make_observer_registry()
+    policy = load_policy(document, registry)
+    document["observer_bindings"][0]["settings"]["timeout_seconds"] = 999
+    binding = policy.bindings[("r", "v", "a" * 64, 0)]
+    assert "timeout_seconds" not in dict(binding.settings)

@@ -54,6 +54,7 @@ from ops_guard.runbooks import (
     MalformedRunbookError,
     UnknownPassageError,
 )
+from ops_guard.proposals import format_timestamp
 from ops_guard.preconditions import ObserverError, ObserverRegistry, OperatorPolicy
 from ops_guard.store import AuditAppend, same_database
 import time
@@ -125,7 +126,7 @@ class ExecutionGate:
         self._observers = observer_registry
         self._policy = authorization_catalog
         self._operator_identity = operator_identity
-        self._observation_deadline = getattr(observer_registry, "_deadline", 30.0)
+
         self._proposals = proposals
         self._approvals = approvals
         self._audit = audit
@@ -165,10 +166,23 @@ class ExecutionGate:
         """
         proposal_id: str | None = None
 
-        def refuse(reason: str, *, digest: str | None = None) -> GateOutcome:
+        def refuse(
+            reason: str,
+            *,
+            digest: str | None = None,
+            failure_code: str | None = None,
+            observation: Mapping | None = None,
+        ) -> GateOutcome:
+            payload: dict = {"reason": reason, "gate": "execution"}
+            if failure_code:
+                payload["failure_code"] = failure_code
+            if observation:
+                # Safe provenance: revision/index/observer/policy-digest and
+                # the match outcome — never a raw observed value.
+                payload["observation"] = dict(observation)
             self._audit.append(
                 "refusal",
-                payload={"reason": reason, "gate": "execution"},
+                payload=payload,
                 proposal_ref=proposal_id,
                 invocation_digest=digest or request.expected_digest,
                 outcome="refused",
@@ -244,7 +258,7 @@ class ExecutionGate:
         #    and zero-based precondition index; missing, unknown, timed-out,
         #    errored, or mismatched observations refuse before authorization.
         observation_provenance: list[dict] = []
-        deadline = time.monotonic() + self._observation_deadline
+        deadline = time.monotonic() + self._observers.deadline_seconds
         for index, precondition in enumerate(frozen.invocation.preconditions):
             binding = self._policy.bindings.get(
                 (
@@ -254,50 +268,78 @@ class ExecutionGate:
                     index,
                 )
             )
+
+            def provenance(outcome: str, observer_id: str | None) -> dict:
+                return {
+                    "runbook_id": request.citation.runbook_id,
+                    "revision": request.citation.revision,
+                    "content_hash": request.citation.content_hash,
+                    "precondition_index": index,
+                    "precondition_name": precondition["name"],
+                    "observer_id": observer_id,
+                    "policy_digest": self._policy.digest,
+                    "observed_at": format_timestamp(self._clock()),
+                    "outcome": outcome,
+                }
+
             if binding is None:
                 return refuse(
                     f"precondition {index} ({precondition['name']!r}) has no "
                     "operator-configured observer for this revision",
                     digest=frozen.invocation_digest,
+                    failure_code="precondition-unmapped",
+                    observation=provenance("unmapped", None),
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return refuse(
                     "total observation deadline exceeded",
                     digest=frozen.invocation_digest,
+                    failure_code="precondition-deadline",
+                    observation=provenance("deadline-exceeded", binding.observer_id),
                 )
+            timeout = min(self._observers.timeout_for(binding.observer_id, dict(binding.settings)), remaining)
             try:
                 observation = self._observers.observe(
                     binding.observer_id,
                     binding.settings,
-                    timeout_seconds=min(
-                        float(binding.settings.get("timeout_seconds", remaining)),
-                        remaining,
-                    ),
+                    timeout_seconds=timeout,
+                    observed_at=self._clock().timestamp(),
                 )
             except ObserverError as error:
+                code = (
+                    "precondition-timeout"
+                    if "timed out" in str(error)
+                    else "precondition-observer-error"
+                )
                 return refuse(
                     f"precondition {index} ({precondition['name']!r}) observation "
                     f"failed: {error}",
                     digest=frozen.invocation_digest,
+                    failure_code=code,
+                    observation=provenance("failed", binding.observer_id),
                 )
+            matched = observation.value == precondition["expected"]
             observation_provenance.append(
                 {
                     "runbook_id": request.citation.runbook_id,
                     "revision": request.citation.revision,
                     "content_hash": request.citation.content_hash,
                     "precondition_index": index,
+                    "precondition_name": precondition["name"],
                     "observer_id": observation.observer_id,
                     "policy_digest": self._policy.digest,
-                    "observed_at": observation.observed_at,
-                    "outcome": "matched" if observation.value == precondition["expected"] else "mismatch",
+                    "observed_at": format_timestamp(self._clock()),
+                    "outcome": "matched" if matched else "mismatch",
                 }
             )
-            if observation.value != precondition["expected"]:
+            if not matched:
                 return refuse(
                     f"precondition {index} ({precondition['name']!r}) did not "
                     "match the required state",
                     digest=frozen.invocation_digest,
+                    failure_code="precondition-mismatch",
+                    observation=observation_provenance[-1],
                 )
 
         # 5. Exactly one valid authorization path: standing match, else

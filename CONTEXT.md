@@ -28,6 +28,12 @@ An estimate attached to a judge risk assessment. Its meaning and derivation are 
 ### Risk class
 The advisory local-judge label recorded on a proposal audit event: `routine` (low-impact, readily reversible), `review` (material or context-dependent impact worth human inspection), or `critical` (plausible severe, destructive, security, availability, or irreversible impact). It is derived from repeated-sample agreement over a fixed menu — agreement is consistency, never confidence — and is audit-only until the evaluation gate passes. Authority: [ADR 0009](docs/adr/0009-local-advisory-judge-audit-projection.md); constraint: `docs/PRODUCT.md`. Rejected alias: **"severity"** — the class is an advisory estimate of operational impact, not a measured or declared severity.
 
+### Operator policy file
+The operator-owned local JSON document (schema `ops-guard-policy-v1`, loaded once at server start from `OPS_GUARD_POLICY_FILE`) that carries the exact standing-authorization records and the observer bindings. It is validated fail-closed and identified by the SHA-256 of its JCS-canonical form; a standing authorization is one *kind of record inside* the policy, not an alias for it. Authority: [ADR 0011](docs/adr/0011-operator-configured-precondition-observers.md). Rejected alias: **"hot config"** — policy changes require a server restart.
+
+### Observer binding
+A policy entry mapping one verified runbook revision and zero-based precondition index to a fixed, code-defined read-only adapter id with strictly typed settings. Bindings never carry commands, URLs, endpoints, or credentials; an unmapped precondition can never execute. Authority: [ADR 0011](docs/adr/0011-operator-configured-precondition-observers.md). Rejected alias: **"probe"** — the adapter is fixed server code; the binding only selects it.
+
 ### Observed outcome
 The execution result recorded after the operation: success, failure, or an explicitly unknown completion when the result cannot be confirmed. Authority: [execution demonstration](docs/execution-demonstration.md); constraint: `docs/PRODUCT.md`. Rejected alias: **"result"** unqualified — an unconfirmed completion must be recorded as unknown, not silently treated as success.
 

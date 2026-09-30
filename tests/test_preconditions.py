@@ -503,6 +503,7 @@ def test_real_corpus_revision_with_docker_observer(tmp_path, monkeypatch) -> Non
         _validate_timeout_seconds,
         timeout_getter=lambda s: float(s["timeout_seconds"]),
     )
+    import hashlib as _hl_corpus
     calls = {"count": 0}
     real_adapter = harness.registry._adapters["docker_engine_running"][0]
 
@@ -542,36 +543,36 @@ def test_real_corpus_revision_with_docker_observer(tmp_path, monkeypatch) -> Non
         bindings=False,
     )
     document["observer_bindings"] = bindings
-    harness.library, _ = RunbookLibrary.load(list(corpus.values()))
     harness.policy = load_policy(document, harness.registry)
-    harness.catalog = load_execution_catalog(
-        {
-            "schema_version": "ops-guard-execution-catalog-v1",
-            "runner_profile": {
-                "profile_id": "test-runner",
-                "executable": "python3",
-                "executable_sha256": "e" * 64,
-                "argv": ["python3", "-c", "pass"],
-                "working_directory": ".",
-                "env_allowlist": ["PATH"],
-                "timeout_seconds": 10,
-                "output_limit": 65536,
-            },
-            "entries": [
-                {
-                    "runbook_id": revision["runbook_id"],
-                    "revision": revision["revision"],
-                    "content_hash": revision["content_hash"],
-                    "action": "update",
-                    "target": "n8n",
-                    "script_id": f"docker-script-{index}",
-                    "script_path": SCRIPT_PATH,
-                    "script_sha256": SCRIPT_SHA256,
-                }
-                for index, revision in enumerate(corpus.values())
-            ],
+    harness.library, _ = RunbookLibrary.load(list(corpus.values()))
+
+    def entry_document_for(revision: dict) -> dict:
+        return {
+            "runbook_id": revision["runbook_id"],
+            "revision": revision["revision"],
+            "content_hash": revision["content_hash"],
+            "action": "update",
+            "target": "n8n",
+            "script_id": f"docker-script-{revision['runbook_id']}",
+            "script_path": SCRIPT_PATH,
+            "script_sha256": SCRIPT_SHA256,
         }
-    )
+
+    catalog_document = {
+        "schema_version": "ops-guard-execution-catalog-v1",
+        "runner_profile": {
+            "profile_id": "test-runner",
+            "executable": "C:/python3",
+            "executable_sha256": "e" * 64,
+            "argv": ["C:/python3", "-c", "pass"],
+            "working_directory": ".",
+            "env_allowlist": ["PATH"],
+            "timeout_seconds": 10,
+            "output_limit": 65536,
+        },
+        "entries": [entry_document_for(revision) for revision in corpus.values()],
+    }
+    harness.catalog = load_execution_catalog(catalog_document)
     harness.gate = harness._gate()
 
     from ops_guard.invocation import Invocation
@@ -590,23 +591,14 @@ def test_real_corpus_revision_with_docker_observer(tmp_path, monkeypatch) -> Non
         from helpers import make_runner_profile
 
         profile = make_runner_profile()
-        entry_document = {
-            "runbook_id": revision["runbook_id"],
-            "revision": revision["revision"],
-            "content_hash": revision["content_hash"],
-            "action": "update",
-            "target": "n8n",
-            "script_id": "docker-script",
-            "script_path": SCRIPT_PATH,
-            "script_sha256": SCRIPT_SHA256,
-        }
+        entry_document = entry_document_for(revision)
         template = ExecutionBindingTemplate(
             runbook_id=revision["runbook_id"],
             runbook_revision=revision["revision"],
             runbook_content_hash=revision["content_hash"],
-            script_id="docker-script",
-            script_path=SCRIPT_PATH,
-            script_sha256=SCRIPT_SHA256,
+            script_id=entry_document["script_id"],
+            script_path=entry_document["script_path"],
+            script_sha256=entry_document["script_sha256"],
             catalog_entry_digest=_hl.sha256(_cj(entry_document)).hexdigest(),
             runner_profile_id=profile.profile_id,
             runner_profile_digest=profile.digest(),

@@ -49,7 +49,7 @@ def catalog_document(**overrides):
             "profile_id": "prod-runner",
             "executable": "/usr/bin/python3",
             "executable_sha256": "e" * 64,
-            "argv": ["python3", "-c", "pass"],
+            "argv": ["/usr/bin/python3", "-c", "pass"],
             "working_directory": "/opt",
             "env_allowlist": ["PATH"],
             "timeout_seconds": 10,

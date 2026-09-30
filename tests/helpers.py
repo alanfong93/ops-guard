@@ -134,9 +134,9 @@ def make_runner_profile():
 
     return RunnerProfile(
         profile_id="test-runner",
-        executable="python3",
+        executable="C:/python3",
         executable_sha256="e" * 64,
-        argv=("python3", "-c", "pass"),
+        argv=("C:/python3", "-c", "pass"),
         working_directory=".",
         env_allowlist=("PATH",),
         timeout_seconds=10,

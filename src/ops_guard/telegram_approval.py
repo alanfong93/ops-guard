@@ -325,8 +325,9 @@ class ApprovalNotifier:
             document = binding["document"]
             parts[-1] += (
                 "\nScript: " + document["script_path"]
-                + " (sha256 " + document["script_sha256"][:16] + "..."
-                + ", runner " + document["runner_profile_id"] + ")"
+                + " (sha256 " + document["script_sha256"]
+                + ", runner " + document["runner_profile_id"]
+                + " profile " + document["runner_profile_digest"] + ")"
             )
         keyboard = {
             "inline_keyboard": [

@@ -207,6 +207,17 @@ def load_execution_catalog(document: Any) -> tuple[dict[tuple[str, str, str, str
     argv = profile_raw["argv"]
     if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
         raise ExecutionCatalogError("runner_profile.argv must be a non-empty list of strings")
+    looks_absolute = os.path.isabs(profile_raw["executable"]) or (
+        profile_raw["executable"].startswith("/")
+    )
+    if not looks_absolute:
+        raise ExecutionCatalogError("runner_profile.executable must be an absolute path")
+    if argv[0] != profile_raw["executable"]:
+        raise ExecutionCatalogError(
+            "runner_profile.argv[0] must equal the profile executable (ADR 0012)"
+        )
+    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) and a for a in argv):
+        raise ExecutionCatalogError("runner_profile.argv must be a non-empty list of strings")
     allowlist = profile_raw["env_allowlist"]
     if not isinstance(allowlist, list) or not all(isinstance(a, str) and a for a in allowlist):
         raise ExecutionCatalogError("runner_profile.env_allowlist must be a list of strings")
@@ -337,10 +348,11 @@ def resolve_binding(
             f"the execution catalog maps {runbook_id}@{revision} {action}/{target} ambiguously"
         )
     entry = matches[0]
-    profile = profiles.get(entry.script_id)
-    if profile is None:
-        # v1: one profile per service, keyed by script_id.
-        profile = next(iter(profiles.values()))
+    if len(profiles) != 1:
+        raise BindingResolutionError(
+            "the execution catalog must declare exactly one runner profile"
+        )
+    profile = next(iter(profiles.values()))
     entry_document = {
         "runbook_id": entry.runbook_id,
         "revision": entry.revision,
@@ -387,11 +399,23 @@ def run_staged(
     temporary file, re-verifies the staged hash, and executes the staged
     path with the profile's fixed argv (`shell=False`), the canonical JCS
     Invocation JSON on stdin, a bounded environment, bounded output, and a
-    hard child-process timeout with process-tree termination. Timeouts map
-    to the explicitly `unknown` outcome (ADR 0005); nothing retries."""
+    hard child-process timeout with process-tree termination. Timeouts and
+    uncertain completions map to the explicitly `unknown` outcome (ADR
+    0005); nothing retries."""
     staged_digest = hashlib.sha256(script_bytes).hexdigest()
     if staged_digest != script_sha256:
         return RunnerResult(outcome="failure", failure_code="staged-hash-mismatch")
+
+    # The runner profile's executable identity is part of the verified
+    # binding: hash the resolved binary before spawning it.
+    try:
+        with open(profile.executable, "rb") as handle:
+            executable_digest = hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        return RunnerResult(outcome="failure", failure_code="runner-executable-unreadable")
+    if executable_digest != profile.executable_sha256:
+        return RunnerResult(outcome="failure", failure_code="runner-executable-mismatch")
+
     tmp_dir = tempfile.mkdtemp(prefix="ops-guard-exec-")
     try:
         staged_path = os.path.join(tmp_dir, "staged-script")
@@ -401,35 +425,58 @@ def run_staged(
         with open(staged_path, "rb") as handle:
             if hashlib.sha256(handle.read()).hexdigest() != script_sha256:
                 return RunnerResult(outcome="failure", failure_code="staged-hash-mismatch")
-        stdin_payload = json.dumps({"invocation": invocation}).encode("utf-8")
+        stdin_payload = canonicalize_json(invocation)
         env = {
             name: os.environ[name]
             for name in profile.env_allowlist
             if name in os.environ
         }
         argv = list(profile.argv) + [staged_path]
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=profile.working_directory,
+            env=env,
+            shell=False,
+            start_new_session=True,  # POSIX: own process group for tree kill
+        )
+        killed_for_output = False
         try:
-            completed = subprocess.run(
-                argv,
-                input=stdin_payload,
-                capture_output=True,
-                cwd=profile.working_directory,
-                env=env,
-                shell=False,
-                timeout=profile.timeout_seconds,
+            stdout, stderr = process.communicate(
+                input=stdin_payload, timeout=profile.timeout_seconds
             )
         except subprocess.TimeoutExpired:
-            # The bounded runner kills the child (and its tree via the
-            # taskkill/killgroup path configured by the operator profile
-            # wrapper); completion is uncertain — explicitly unknown.
+            _terminate_tree(process)
             return RunnerResult(outcome="unknown", failure_code="executor-timeout")
         except OSError:
             return RunnerResult(outcome="unknown", failure_code="spawn-failure")
-        del completed.stdout, completed.stderr  # bounded and discarded
-        if completed.returncode == 0:
+        limit = profile.output_limit
+        if len(stdout) > limit or len(stderr) > limit or killed_for_output:
+            return RunnerResult(outcome="failure", failure_code="output-limit")
+        del stdout, stderr  # bounded and discarded; never returned or audited
+        if process.returncode == 0:
             return RunnerResult(outcome="success", failure_code=None)
         return RunnerResult(outcome="failure", failure_code="non-zero-exit")
     finally:
         import shutil
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _terminate_tree(process: subprocess.Popen) -> None:
+    """Kill the child and, on POSIX, its whole process group."""
+    import signal
+
+    try:
+        if hasattr(os, "killpg") and hasattr(os, "setsid"):
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass

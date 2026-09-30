@@ -56,7 +56,6 @@ from ops_guard.runbooks import (
 )
 from ops_guard.proposals import format_timestamp
 from ops_guard.execution_binding import canonical_binding_digest
-from ops_guard.execution_binding import canonical_binding_digest
 from ops_guard.preconditions import (
         ObserverError,
         ObserverRegistry,
@@ -279,16 +278,37 @@ class ExecutionGate:
             )
         if self._catalog is not None:
             catalog_entries, catalog_profiles = self._catalog
-            entry_key = (
-                request.citation.runbook_id,
-                request.citation.revision,
-                request.citation.content_hash,
-                frozen.invocation.action,
-                frozen.invocation.target,
+            entry = catalog_entries.get(
+                (
+                    execution_binding["runbook_id"],
+                    execution_binding["runbook_revision"],
+                    execution_binding["runbook_content_hash"],
+                    frozen.invocation.action,
+                    frozen.invocation.target,
+                )
             )
-            entry = catalog_entries.get(entry_key)
+            entry_document = (
+                {
+                    "runbook_id": entry.runbook_id,
+                    "revision": entry.revision,
+                    "content_hash": entry.content_hash,
+                    "action": entry.action,
+                    "target": entry.target,
+                    "script_id": entry.script_id,
+                    "script_path": entry.script_path,
+                    "script_sha256": entry.script_sha256,
+                }
+                if entry is not None
+                else None
+            )
+            entry_digest = (
+                canonical_binding_digest(entry_document)
+                if entry_document is not None
+                else None
+            )
             if (
                 entry is None
+                or entry_digest != execution_binding["catalog_entry_digest"]
                 or entry.script_sha256 != execution_binding["script_sha256"]
                 or entry.script_path != script_path
             ):
@@ -504,22 +524,36 @@ class ExecutionGate:
         if executor is None:
             # Production dispatch (issue #64): the staged runner bound to the
             # proposal's runner profile. The staged bytes are already
-            # hash-verified above. A runner timeout maps to the explicitly
-            # unknown outcome inside run_staged; nothing retries, and the
-            # runner never raises past this point.
+            # hash-verified above. The runner reports all three outcomes
+            # (success / failure / unknown) and never raises past this
+            # point; an unexpected crash is still recorded as a failure
+            # before it propagates.
             from ops_guard.execution_binding import run_staged
 
             profile = self._runner_profiles[execution_binding["runner_profile_id"]]
-            runner_result = run_staged(
-                profile,
-                script_path=script_path,
-                script_bytes=script_bytes,
-                script_sha256=resolved_sha256,
-                invocation=consumed.invocation.to_json(),
-            )
+            try:
+                runner_result = run_staged(
+                    profile,
+                    script_path=script_path,
+                    script_bytes=script_bytes,
+                    script_sha256=resolved_sha256,
+                    invocation=consumed.invocation.to_json(),
+                )
+            except BaseException as error:  # noqa: BLE001 - recorded as failure
+                self._audit.append(
+                    "execution_outcome",
+                    payload={"outcome": "failure"},
+                    correlation_id=frozen.proposal_id,
+                    proposal_ref=frozen.proposal_id,
+                    invocation_digest=frozen.invocation_digest,
+                    authorization_path=path,
+                    outcome="failure",
+                    failure_code="executor-error",
+                )
+                raise
             reported = runner_result.outcome
             failure_code = runner_result.failure_code
-            if reported not in _OUTCOMES:
+            if reported not in ("success", "failure", "unknown"):
                 raise ValueError(
                     f"runner must report success, failure or unknown, got {reported!r}"
                 )

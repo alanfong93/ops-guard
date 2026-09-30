@@ -25,3 +25,7 @@ The main residual risk is mapping drift; operator-owned config is therefore stri
 ## Consequences
 
 Each newly verified precondition needs an operator mapping to an implemented observer. An unsupported condition remains non-executable until a trusted source is deliberately added. External state may change after observation; the gate records the snapshot/time but does not claim an atomic lock on other systems. No public MCP/API field carries an observation or standing authorization.
+
+## Amendment (2026-09-30, review cycles 1-2 of issue #62)
+
+Refusals carry safe observation provenance: the audit refusal payload records `failure_code` (in the audit event's failure-code column) plus an `observation` object with the runbook id/revision/content hash, precondition index and name, observer id, canonical policy digest, timestamp, and match outcome. Raw observed values and adapter exception text are never included. The failure codes are closed: `precondition-unmapped`, `precondition-deadline`, `precondition-timeout`, `precondition-observer-error`, `precondition-mismatch`. Consumers must treat a `null`/absent rate or `vacuous` supplemental results as not meeting any threshold numerically.

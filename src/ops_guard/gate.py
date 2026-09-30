@@ -55,7 +55,12 @@ from ops_guard.runbooks import (
     UnknownPassageError,
 )
 from ops_guard.proposals import format_timestamp
-from ops_guard.preconditions import ObserverError, ObserverRegistry, OperatorPolicy
+from ops_guard.preconditions import (
+        ObserverError,
+        ObserverRegistry,
+        ObserverTimeout,
+        OperatorPolicy,
+    )
 from ops_guard.store import AuditAppend, same_database
 import time
 
@@ -185,6 +190,7 @@ class ExecutionGate:
                 payload=payload,
                 proposal_ref=proposal_id,
                 invocation_digest=digest or request.expected_digest,
+                failure_code=failure_code,
                 outcome="refused",
             )
             return GateOutcome(
@@ -309,7 +315,7 @@ class ExecutionGate:
             except ObserverError as error:
                 code = (
                     "precondition-timeout"
-                    if "timed out" in str(error)
+                    if isinstance(error, ObserverTimeout)
                     else "precondition-observer-error"
                 )
                 return refuse(

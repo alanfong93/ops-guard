@@ -46,6 +46,10 @@ class ObserverError(ProposalError):
     """A trusted observation failed, timed out, or was malformed."""
 
 
+class ObserverTimeout(ObserverError):
+    """The adapter exceeded its bounded per-observation budget."""
+
+
 def policy_digest(document: Mapping[str, Any]) -> str:
     """SHA-256 over the JCS-canonicalized policy document."""
     return hashlib.sha256(canonicalize_json(document)).hexdigest()
@@ -109,7 +113,6 @@ class ObserverRegistry:
         ] = {}
         self._deadline = deadline_seconds
         self._lock = threading.Lock()
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
     @property
     def deadline_seconds(self) -> float:
@@ -172,20 +175,30 @@ class ObserverRegistry:
             timeout_seconds if timeout_seconds is not None else timeout_getter(settings)
         )
         started = time.monotonic()
-        future = self._executor.submit(adapter, settings)
-        try:
-            value = future.result(timeout=effective_timeout)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
-            raise ObserverError(
+        outcome: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                outcome["value"] = adapter(settings)
+            except BaseException as error:  # noqa: BLE001 - captured, typed below
+                outcome["error"] = error
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(timeout=effective_timeout)
+        if worker.is_alive():
+            # The adapter outlived its bounded budget: the late result (if
+            # any) is discarded and can never authorize. Adapters must bound
+            # their own I/O; the daemon thread cannot block interpreter exit.
+            raise ObserverTimeout(
                 f"observer {observer_id!r} timed out after {effective_timeout}s"
             ) from None
-        except ObserverError:
-            raise
-        except Exception as error:  # noqa: BLE001 - adapter failure is a typed refusal
+        if "error" in outcome:
+            error = outcome["error"]
             raise ObserverError(
                 f"observer {observer_id!r} failed ({type(error).__name__})"
-            ) from None
+            ) from error
+        value = outcome.get("value")
         if not isinstance(value, str) or not value:
             raise ObserverError(f"observer {observer_id!r} returned a malformed observation")
         if time.monotonic() - started > self._deadline:
@@ -286,6 +299,8 @@ def load_policy(document: Any, registry: ObserverRegistry) -> OperatorPolicy:
         precondition_index = raw["precondition_index"]
         if not isinstance(precondition_index, int) or isinstance(precondition_index, bool) or precondition_index < 0:
             raise PolicyError(f"observer_bindings[{index}].precondition_index must be a non-negative integer")
+        if not isinstance(raw["settings"], dict):
+            raise PolicyError(f"observer_bindings[{index}].settings must be a JSON object")
         binding = ObserverBinding(
             runbook_id=raw["runbook_id"],
             revision=raw["revision"],

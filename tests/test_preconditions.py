@@ -41,6 +41,7 @@ from tests_helpers_runbook import VALID_RUNBOOK
 
 OPERATOR = "alan"
 SCRIPT_PATH = "/opt/scripts/restart-n8n.sh"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_BYTES = b"#!/bin/sh\necho ok\n"
 
 
@@ -472,8 +473,9 @@ def test_docker_engine_running_adapter_branches(monkeypatch) -> None:
 
 
 def test_real_corpus_revision_with_docker_observer(tmp_path, monkeypatch) -> None:
-    """The shipped #55 revision binds to the real docker observer: a running
-    engine dispatches; a stopped engine refuses before consumption."""
+    """The shipped #55 revisions bind their docker-engine precondition to the
+    real docker observer: a running engine dispatches; a stopped engine
+    refuses with precondition-mismatch even when an approval exists."""
     import subprocess as sp
     from ops_guard.preconditions import (
         _docker_engine_running,
@@ -487,31 +489,99 @@ def test_real_corpus_revision_with_docker_observer(tmp_path, monkeypatch) -> Non
         _validate_timeout_seconds,
         timeout_getter=lambda s: float(s["timeout_seconds"]),
     )
-    harness.policy = load_test_policy(
-        make_policy_document(
-            runbook_id=VALID_RUNBOOK["runbook_id"],
-            revision=VALID_RUNBOOK["revision"],
-            content_hash=VALID_RUNBOOK["content_hash"],
-        ),
-        harness.registry,
+    calls = {"count": 0}
+    real_adapter = harness.registry._adapters["docker_engine_running"][0]
+
+    def counting(settings):
+        calls["count"] += 1
+        return real_adapter(settings)
+
+    harness.registry._adapters["docker_engine_running"] = (
+        counting,
+        harness.registry._adapters["docker_engine_running"][1],
+        harness.registry._adapters["docker_engine_running"][2],
     )
+
+    # Bind BOTH shipped corpus revisions' precondition index 0 (the
+    # docker-engine precondition each declares) to the real observer.
+    bindings = []
+    corpus_dir = os.path.join(REPO_ROOT, "runbooks")
+    corpus: dict[str, dict] = {}
+    for name in sorted(os.listdir(corpus_dir)):
+        with open(os.path.join(corpus_dir, name), encoding="utf-8") as handle:
+            revision = json.load(handle)
+        corpus[revision["runbook_id"]] = revision
+        bindings.append(
+            {
+                "runbook_id": revision["runbook_id"],
+                "revision": revision["revision"],
+                "content_hash": revision["content_hash"],
+                "precondition_index": 0,
+                "observer_id": "docker_engine_running",
+                "settings": {"timeout_seconds": 2},
+            }
+        )
+    document = make_policy_document(
+        runbook_id="unused",
+        revision="unused",
+        content_hash="unused",
+        bindings=False,
+    )
+    document["observer_bindings"] = bindings
+    harness.library, _ = RunbookLibrary.load(list(corpus.values()))
+    harness.policy = load_policy(document, harness.registry)
     harness.gate = harness._gate()
+
+    from ops_guard.invocation import Invocation
+
+    def corpus_issue() -> tuple[object, Invocation]:
+        revision = corpus["n8n-update"]
+        invocation = Invocation(
+            action=revision["operation"]["action"],
+            target=revision["operation"]["target"],
+            arguments={"mode": "check"},
+            preconditions=[dict(item) for item in revision["preconditions"]],
+            runbook_revision_hash=revision["content_hash"],
+        )
+        issued = harness.service.open_proposal(invocation, ttl=timedelta(minutes=10))
+        request = ExecutionRequest(
+            token=issued.token,
+            script_path=SCRIPT_PATH,
+            citation=__import__(
+                "ops_guard", fromlist=["Citation"]
+            ).Citation(
+                runbook_id=revision["runbook_id"],
+                revision=revision["revision"],
+                content_hash=revision["content_hash"],
+                locator="update/ordering",
+            ),
+        )
+        return issued, request
 
     class Completed:
         def __init__(self, returncode, stdout):
             self.returncode = returncode
             self.stdout = stdout
 
+    # A running engine satisfies docker-engine == running: dispatch.
     monkeypatch.setattr(sp, "run", lambda *a, **k: Completed(0, "27.0.1"))
-    issued = harness.issue()
+    issued, request = corpus_issue()
     harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
-    outcome = harness.gate.execute(harness.request(issued.token), lambda i, s: "success")
+    outcome = harness.gate.execute(request, lambda i, s: "success")
     assert outcome.dispatched
+    assert calls["count"] == 1
 
-    issued2 = harness.issue()
+    # A stopped engine mismatches docker-engine == running: refusal with the
+    # typed failure code, the real observer id, and no token consumption —
+    # even though an approval was recorded.
     monkeypatch.setattr(sp, "run", lambda *a, **k: Completed(1, ""))
-    outcome = harness.gate.execute(harness.request(issued2.token), lambda i, s: "success")
+    issued2, request2 = corpus_issue()
+    harness.verifier.record_approval(issued2.token, operator_identity=OPERATOR)
+    outcome = harness.gate.execute(request2, lambda i, s: "success")
     assert not outcome.dispatched
+    refusals = [e for e in harness.audit.events() if e.event_type == "refusal"]
+    assert refusals[-1].payload["failure_code"] == "precondition-mismatch"
+    assert refusals[-1].payload["observation"]["observer_id"] == "docker_engine_running"
     frozen = harness.service.resolve(issued2.token)
     assert not frozen.consumed
 

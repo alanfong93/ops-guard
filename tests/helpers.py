@@ -55,3 +55,74 @@ def fresh_service() -> tuple[ProposalService, FakeClock]:
         ProposalStore(path), token_key=os.urandom(32), clock=clock, audit=audit
     )
     return service, clock
+
+
+def make_observer_registry(values: dict[str, str] | None = None):
+    """A registry with one scripted test observer plus the real fixed set
+    minus live I/O (issue #62). The 'static_test' observer returns the
+    configured value per observer-id key ('static_test' -> values.get)."""
+    from ops_guard.preconditions import ObserverRegistry, PolicyError
+
+    registry = ObserverRegistry()
+    state = {"value": (values or {}).get("static_test", "passing")}
+
+    def static_adapter(settings):
+        return state["value"]
+
+    def static_validator(settings):
+        if not isinstance(settings, dict) or settings != {}:
+            raise PolicyError("static_test settings must be exactly {}")
+
+    registry.register("static_test", static_adapter, static_validator)
+    registry._test_state = state
+    return registry
+
+
+def make_policy_document(
+    *,
+    runbook_id: str,
+    revision: str,
+    content_hash: str,
+    standing=(),
+    bindings: bool = True,
+):
+    """A minimal valid operator policy document for tests.
+
+    ``bindings=False`` yields no observer bindings: every precondition is
+    unmapped and must refuse (issue #62 fail-closed)."""
+    return {
+        "schema_version": "ops-guard-policy-v1",
+        "standing_authorizations": [
+            {
+                "authorization_id": record.authorization_id,
+                "script_path": record.script_path,
+                "script_sha256": record.script_sha256,
+                "action": record.action,
+                "target": record.target,
+                "arguments": dict(record.arguments),
+                "preconditions": [dict(p) for p in record.preconditions],
+                "runbook_revision_hash": record.runbook_revision_hash,
+            }
+            for record in standing
+        ],
+        "observer_bindings": (
+            [
+                {
+                    "runbook_id": runbook_id,
+                    "revision": revision,
+                    "content_hash": content_hash,
+                    "precondition_index": 0,
+                    "observer_id": "static_test",
+                    "settings": {},
+                }
+            ]
+            if bindings
+            else []
+        ),
+    }
+
+
+def load_test_policy(document, registry):
+    from ops_guard.preconditions import load_policy
+
+    return load_policy(document, registry)

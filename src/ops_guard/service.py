@@ -29,6 +29,7 @@ from fastmcp.server.auth import AccessToken, TokenVerifier
 from local_judge.ollama import UrllibOllamaTransport
 
 from ops_guard.audit import AuditLog, AuditStore
+from ops_guard.errors import ProposalError
 from ops_guard.proposal_tool import DEFAULT_PROPOSAL_TTL_SECONDS
 from ops_guard.telegram_approval import ApprovalConfigError
 from ops_guard.proposals import ProposalService, default_clock
@@ -367,6 +368,21 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     except ApprovalConfigError as error:
         print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
         return 2
+    # Operator policy (issue #62; ADR 0011): validated once per server
+    # start, fail-closed on any error. The execution gate consumes it when
+    # the execute surface is wired (issue #64).
+    policy_path = environment.get("OPS_GUARD_POLICY_FILE")
+    if policy_path:
+        from ops_guard.preconditions import default_registry, load_policy_file
+
+        try:
+            policy = load_policy_file(policy_path, default_registry())
+        except ProposalError as error:
+            print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
+            return 2
+        print(
+            f"[ops-guard] operator policy loaded (digest {policy.digest[:16]}...)", flush=True
+        )
     if runtime is not None:
         runtime.start()
         print("[ops-guard] approval transport enabled (Telegram, private operator DM)", flush=True)

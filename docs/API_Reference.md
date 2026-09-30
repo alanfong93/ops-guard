@@ -29,7 +29,12 @@ native Uvicorn TLS at the configured LAN endpoint ([ADR 0006](adr/0006-lan-mcp-t
 - **Configuration** — all environment variables from
   [ADR 0006's environment contract](adr/0006-lan-mcp-transport.md) are
   required; a missing, empty, or invalid value exits before a listener
-  opens, naming the variable and never a secret value.
+  opens, naming the variable and never a secret value. The optional
+  `OPS_GUARD_POLICY_FILE` loads the operator policy
+  ([ADR 0011](adr/0011-operator-configured-precondition-observers.md),
+  schema `ops-guard-policy-v1`): exact standing-authorization records plus
+  observer bindings, validated fail-closed at startup and identified by a
+  canonical digest. No MCP tool or HTTP endpoint can read or edit it.
 
 ## Tools
 

@@ -77,6 +77,18 @@ class Wiring:
             ApprovalStore(self.db_path), self.service, operator_identity="alan", clock=self.clock
         )
         self.scripts = {"/opt/scripts/restart-n8n.sh": b"#!/bin/sh\necho ok\n"}
+        from helpers import make_observer_registry, make_policy_document, load_test_policy
+
+        registry = make_observer_registry({"static_test": "running"})
+        cited = cited_revision()
+        policy = load_test_policy(
+            make_policy_document(
+                runbook_id=cited["runbook_id"],
+                revision=cited["revision"],
+                content_hash=cited["content_hash"],
+            ),
+            registry,
+        )
         self.gate = ExecutionGate(
             self.service,
             self.verifier,
@@ -84,6 +96,9 @@ class Wiring:
             runbooks=self.library,
             script_source=self.scripts.__getitem__,
             clock=self.clock,
+            observer_registry=registry,
+            authorization_catalog=policy,
+            operator_identity="alan",
         )
 
     def propose(self, locator: str) -> dict:
@@ -140,8 +155,6 @@ def test_locator_a_at_proposal_time_and_locator_b_at_execution_are_both_audited(
             content_hash=cited_revision()["content_hash"],
             locator="update/steps",
         ),
-        observed_preconditions={"docker-engine": "running"},
-        operator_identity="alan",
     )
     outcome = wiring.gate.execute(request, lambda invocation, script: "success")
     assert outcome.dispatched
@@ -164,8 +177,6 @@ def test_matching_proposal_evidence_refs_alone_cannot_authorize_execution(wiring
             content_hash=cited_revision()["content_hash"],
             locator="update/ordering",
         ),
-        observed_preconditions={"docker-engine": "running"},
-        operator_identity="alan",
     )
     outcome = wiring.gate.execute(request, lambda invocation, script: "success")
     assert not outcome.dispatched
@@ -185,8 +196,6 @@ def test_invalid_execution_evidence_still_refuses(wiring) -> None:
             content_hash="c" * 64,  # not a verified revision hash in the library
             locator="update/ordering",
         ),
-        observed_preconditions={"docker-engine": "running"},
-        operator_identity="alan",
     )
     outcome = wiring.gate.execute(request, lambda invocation, script: "success")
     assert not outcome.dispatched

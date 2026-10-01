@@ -93,19 +93,22 @@ unchanged union and unchanged pinned library.
 | deterministic_fixtures | pass | **pass** |
 | normal_cases | fail (0/50 answered) | **pass** (accuracy 1.0) |
 | ambiguous_cases | fail | **pass** (coverage 1.0) |
-| adversarial_matched_pairs | fail | fail — task preservation 0.75 (needs ≥ 0.9) |
-| metamorphic_invariance | fail | fail — irrelevant-evidence-insertion 0.65 (needs ≥ 0.8); the authoritative rates for the other three relations are 1.0 (the supplemental full-map comparator, which scores the whole answer object rather than the choice alone, adds `json-key-reorder` at 0.95) |
+| adversarial_matched_pairs | fail | **fail in both runs** — task preservation 0.75 / 0.737 (needs ≥ 0.9), drop 25–26 pp (needs ≤ 10) |
+| metamorphic_invariance | fail | pass on the declared run (all four relations 1.0) — but **unstable**: an earlier live run of the identical configuration scored irrelevant-evidence-insertion 0.65 |
 
-`demonstrated_usefulness` stays **false**: the two remaining failures are
-capability limits of the pinned 8B model, not format problems. Probe
-evidence: instruction variants (including explicit task-preservation
-clauses) do not move irrelevant-evidence invariance (stable at 13/20
-pairs) — inserted irrelevant noise flips `critical`→`review` regardless.
-Under the same union, every locally available model reproduces the
-shape-driven inability exit (`qwen3:8b`, `huihui_ai/qwen3.5-abliterated:4b`,
-`gemma4:e4b`), so direction 2 has no local candidate; a larger or
-non-local judge model is an operator decision (cost and locality trade
-against the frozen local profile) and remains the next re-plan lever.
+`demonstrated_usefulness` stays **false**: the adversarial gate fails in
+every run — the model drops ~25 accuracy points under role-spoofing and
+sibling vectors, a stable capability limit of the pinned 8B model. Two
+findings from probing are recorded as evidence, not claims: (1) v1's
+abstention was shape-driven (fixed by v2's explicit format instructions);
+(2) irrelevant-evidence invariance at temperature 0 is not stable for
+this model — identical configuration scored 0.65 and 1.0 across runs —
+so no robustness claim is made from either number. Under the same union,
+every locally available model reproduces the shape-driven inability exit
+(`qwen3:8b`, `huihui_ai/qwen3.5-abliterated:4b`, `gemma4:e4b`), so
+direction 2 has no local candidate; a larger or non-local judge model is
+an operator decision (cost and locality trade against the frozen local
+profile) and remains the next re-plan lever.
 
 The #73-review hardening is folded into the runner: each full-map
 relation now reports `underpowered` below five answered pairs, and the

@@ -442,20 +442,45 @@ def run_staged(
             shell=False,
             start_new_session=True,  # POSIX: own process group for tree kill
         )
-        killed_for_output = False
+        limit = profile.output_limit
+        overflow: dict[str, bool] = {"stdout": False, "stderr": False}
+
+        def _drain(stream, key: str) -> None:
+            drained = 0
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    return
+                drained += len(chunk)
+                if drained > limit:
+                    overflow[key] = True
+                    _terminate_tree(process)
+                    return
+
+        import threading as _threading
+
+        readers = [
+            _threading.Thread(target=_drain, args=(process.stdout, "stdout"), daemon=True),
+            _threading.Thread(target=_drain, args=(process.stderr, "stderr"), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
         try:
-            stdout, stderr = process.communicate(
-                input=stdin_payload, timeout=profile.timeout_seconds
-            )
+            process.stdin.write(stdin_payload)
+            process.stdin.close()
+        except OSError:
+            pass  # a child that closed stdin early must not crash the runner
+        try:
+            process.wait(timeout=profile.timeout_seconds)
         except subprocess.TimeoutExpired:
             _terminate_tree(process)
             return RunnerResult(outcome="unknown", failure_code="executor-timeout")
         except OSError:
             return RunnerResult(outcome="unknown", failure_code="spawn-failure")
-        limit = profile.output_limit
-        if len(stdout) > limit or len(stderr) > limit or killed_for_output:
+        for reader in readers:
+            reader.join(timeout=5)
+        if overflow["stdout"] or overflow["stderr"]:
             return RunnerResult(outcome="failure", failure_code="output-limit")
-        del stdout, stderr  # bounded and discarded; never returned or audited
         if process.returncode == 0:
             return RunnerResult(outcome="success", failure_code=None)
         return RunnerResult(outcome="failure", failure_code="non-zero-exit")
@@ -466,15 +491,26 @@ def run_staged(
 
 
 def _terminate_tree(process: subprocess.Popen) -> None:
-    """Kill the child and, on POSIX, its whole process group."""
+    """Kill the child and its whole process tree.
+
+    POSIX: the child runs in its own session (start_new_session), so
+    killpg reaches every descendant. Windows: taskkill /F /T walks the
+    PID tree; a plain TerminateProcess would orphan grandchildren."""
     import signal
 
     try:
         if hasattr(os, "killpg") and hasattr(os, "setsid"):
             os.killpg(process.pid, signal.SIGKILL)
         else:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=10,
+            )
             process.kill()
     except OSError:
+        process.kill()
+    except subprocess.TimeoutExpired:
         pass
     try:
         process.wait(timeout=10)

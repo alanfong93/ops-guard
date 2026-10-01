@@ -30,7 +30,7 @@ from local_judge.ollama import UrllibOllamaTransport
 
 from ops_guard.audit import AuditLog, AuditStore
 from ops_guard.errors import ProposalError
-from ops_guard.gate import ExecutionGate
+from ops_guard.gate import ExecutionGate, GateConfigurationError
 from ops_guard.proposal_tool import DEFAULT_PROPOSAL_TTL_SECONDS
 from ops_guard.telegram_approval import ApprovalConfigError
 from ops_guard.proposals import ProposalService, default_clock
@@ -286,19 +286,26 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog, Proposal
         print(f"[ops-guard] execution catalog loaded from {catalog_path}", flush=True)
     gate = None
     if execution_catalog is not None:
-        observer_registry = default_registry()
         policy_path = os.environ.get("OPS_GUARD_POLICY_FILE")
-        operator_policy = (
-            load_policy_file(policy_path, observer_registry) if policy_path else None
-        )
+        if not policy_path:
+            raise StartupError(
+                "OPS_GUARD_POLICY_FILE must be set when OPS_GUARD_EXECUTION_CATALOG "
+                "is set: the execution gate requires an operator policy"
+            )
+        operator_identity = os.environ.get("OPS_GUARD_APPROVAL_OPERATOR_IDENTITY")
+        if not operator_identity:
+            raise StartupError(
+                "OPS_GUARD_APPROVAL_OPERATOR_IDENTITY must be set when "
+                "OPS_GUARD_EXECUTION_CATALOG is set"
+            )
+        observer_registry = default_registry()
+        operator_policy = load_policy_file(policy_path, observer_registry)
         gate = ExecutionGate(
             proposals,
             ApprovalVerifier(
                 ApprovalStore(config.db_path),
                 proposals,
-                operator_identity=os.environ.get(
-                    "OPS_GUARD_APPROVAL_OPERATOR_IDENTITY", "operator"
-                ),
+                operator_identity=operator_identity,
                 clock=clock,
             ),
             audit,
@@ -307,9 +314,7 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog, Proposal
             clock=clock,
             observer_registry=observer_registry,
             authorization_catalog=operator_policy,
-            operator_identity=os.environ.get(
-                "OPS_GUARD_APPROVAL_OPERATOR_IDENTITY", "operator"
-            ),
+            operator_identity=operator_identity,
             execution_catalog=execution_catalog,
         )
     server = build_mcp_server(
@@ -407,7 +412,7 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     try:
         config = load_config(environment)
         app, audit, proposals = build_http_server(config)
-    except (ConfigurationError, StartupError) as error:
+    except (ConfigurationError, StartupError, GateConfigurationError) as error:
         print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
         return 2
     try:
@@ -416,7 +421,8 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
         print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
         return 2
     # Operator policy (issue #62; ADR 0011): validated once per server
-    # start, fail-closed on any error.
+    # start, fail-closed on any error — even when no execution catalog is
+    # wired, so a bad policy never reaches a listening server.
     policy_path = environment.get("OPS_GUARD_POLICY_FILE")
     if policy_path:
         from ops_guard.preconditions import default_registry, load_policy_file
@@ -428,11 +434,6 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
             return 2
         print(
             f"[ops-guard] operator policy loaded (digest {policy.digest[:16]}...)", flush=True
-        )
-    catalog_path = environment.get("OPS_GUARD_EXECUTION_CATALOG")
-    if catalog_path:
-        print(
-            f"[ops-guard] execution catalog loaded from {catalog_path}", flush=True
         )
     if runtime is not None:
         runtime.start()

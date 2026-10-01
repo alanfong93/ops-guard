@@ -161,7 +161,8 @@ def validate_tls_pair(certfile: str, keyfile: str) -> ssl.SSLContext:
     except (ssl.SSLError, OSError) as error:
         raise StartupError(
             "OPS_GUARD_TLS_CERTFILE / OPS_GUARD_TLS_KEYFILE: "
-            f"certificate and key must be a loadable PEM pair ({type(error).__name__})"
+            f"certificate and key must be a loadable PEM pair "
+            f"({type(error).__name__}: {error})"
         ) from error
     return context
 
@@ -262,7 +263,7 @@ def build_http_server(
     except (sqlite3.Error, OSError) as error:
         raise StartupError(
             f"OPS_GUARD_DB_PATH: audit/proposal store must be initializable at "
-            f"{config.db_path} ({type(error).__name__})"
+            f"{config.db_path} ({type(error).__name__}: {error})"
         ) from error
     counts: dict[str, int] = {}
     for reconciliation in reconciliations:

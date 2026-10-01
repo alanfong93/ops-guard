@@ -307,6 +307,51 @@ def test_unusable_database_path_fails_startup_as_typed_error(tmp_path) -> None:
     assert "OPS_GUARD_DB_PATH" in str(raised.value)
 
 
+def test_startup_error_text_carries_underlying_message(tmp_path) -> None:
+    """The store wrapper's StartupError includes the underlying error
+    text, not just its type name (#69)."""
+    from ops_guard.service import ServiceConfig, StartupError, build_http_server
+
+    cert_path, key_path = _write_test_certificate(tmp_path)
+    db_path = tmp_path / "corrupt"
+    db_path.mkdir()
+    (db_path / "service.db").write_text("not a database", encoding="utf-8")
+    config = ServiceConfig(
+        bearer_token=BEARER_TOKEN,
+        proposal_token_key=bytes.fromhex("a" * 64),
+        audit_fingerprint_key=bytes.fromhex("b" * 64),
+        db_path=str(db_path / "service.db"),
+        runbook_dir=PUBLIC_CORPUS,
+        bind_host="127.0.0.1",
+        port=0,
+        tls_certfile=cert_path,
+        tls_keyfile=key_path,
+        allowed_hosts=("localhost",),
+        allowed_origins=("https://ops-guard.lan",),
+        proposal_ttl_seconds=900,
+    )
+    with pytest.raises(StartupError) as raised:
+        build_http_server(config)
+    message = str(raised.value)
+    assert "OPS_GUARD_DB_PATH" in message
+    assert "not a database" in message
+    assert type(raised.value.__cause__).__name__ in message
+
+
+def test_tls_startup_error_text_carries_underlying_message(tmp_path) -> None:
+    """The TLS wrapper's StartupError includes the underlying error text
+    (#69)."""
+    from ops_guard.service import ServiceConfig, StartupError, validate_tls_pair
+
+    certfile = str(tmp_path / "absent.pem")
+    with pytest.raises(StartupError) as raised:
+        validate_tls_pair(certfile, str(tmp_path / "absent-key.pem"))
+    message = str(raised.value)
+    assert "OPS_GUARD_TLS_CERTFILE / OPS_GUARD_TLS_KEYFILE" in message
+    assert "No such file or directory" in message
+    assert type(raised.value.__cause__).__name__ in message
+
+
 def test_startup_does_not_log_secret_values(service, capsys) -> None:
     captured = capsys.readouterr()
     out = captured.out + captured.err

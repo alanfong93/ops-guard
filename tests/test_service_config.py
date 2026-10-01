@@ -7,6 +7,7 @@ and never a secret value.
 
 from __future__ import annotations
 
+import os
 import ssl
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -187,6 +188,22 @@ def test_missing_tls_files_fail_validation(tmp_path) -> None:
         validate_tls_pair(str(tmp_path / "absent.pem"), str(tmp_path / "absent-key.pem"))
 
 
+def test_tls_startup_error_carries_underlying_message(tmp_path) -> None:
+    """The underlying error text is visible in the StartupError message,
+    not just its type name (#69)."""
+    from ops_guard.service import StartupError
+
+    certfile = str(tmp_path / "absent.pem")
+    with pytest.raises(StartupError) as raised:
+        validate_tls_pair(certfile, str(tmp_path / "absent-key.pem"))
+    message = str(raised.value)
+    assert "OPS_GUARD_TLS_CERTFILE / OPS_GUARD_TLS_KEYFILE" in message
+    # the underlying OSError text is present (this OSError carries errno
+    # text but not the filename), plus the cause's type name
+    assert "No such file or directory" in message
+    assert type(raised.value.__cause__).__name__ in message
+
+
 def _write_pem(tmp_path, *, name: str, **kwargs) -> tuple[str, str]:
     from datetime import datetime, timedelta, timezone
 
@@ -234,5 +251,9 @@ def test_mismatched_certificate_and_key_fail_validation(tmp_path) -> None:
 
     cert_a, key_a = _write_pem(tmp_path, name="a")
     cert_b, key_b = _write_pem(tmp_path, name="b")
-    with pytest.raises(StartupError):
+    with pytest.raises(StartupError) as raised:
         validate_tls_pair(cert_a, key_b)
+    message = str(raised.value)
+    assert "OPS_GUARD_TLS_CERTFILE / OPS_GUARD_TLS_KEYFILE" in message
+    assert "key values mismatch" in message
+    assert type(raised.value.__cause__).__name__ == "SSLError"

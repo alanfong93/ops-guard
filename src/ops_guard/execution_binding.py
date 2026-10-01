@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -457,6 +458,33 @@ class _WindowsJob:
 
         self._kernel32.TerminateJobObject(self._handle, 1)
 
+    def active_processes(self) -> int | None:
+        """The job's active process count, or None if the query fails."""
+        import ctypes
+
+        class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", ctypes.c_ulong),
+                ("TotalProcesses", ctypes.c_ulong),
+                ("ActiveProcesses", ctypes.c_ulong),
+                ("TotalTerminatedProcesses", ctypes.c_ulong),
+            ]
+
+        info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        if not self._kernel32.QueryInformationJobObject(
+            self._handle,
+            1,  # JobObjectBasicAccountingInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            None,
+        ):
+            return None
+        return info.ActiveProcesses
+
     def close(self) -> None:
         import ctypes
 
@@ -500,6 +528,7 @@ def run_staged(
 
     tmp_dir = tempfile.mkdtemp(prefix="ops-guard-exec-")
     job = None
+    process = None
     try:
         staged_path = os.path.join(tmp_dir, "staged-script")
         with open(staged_path, "wb") as handle:
@@ -515,6 +544,12 @@ def run_staged(
             if name in os.environ
         }
         argv = list(profile.argv) + [staged_path]
+        popen_kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            # Created suspended: the child cannot execute a single
+            # instruction, let alone spawn a descendant, before it is
+            # assigned to the Job Object (no arming race).
+            popen_kwargs["creationflags"] = 0x00000004  # CREATE_SUSPENDED
         process = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE,
@@ -524,14 +559,26 @@ def run_staged(
             env=env,
             shell=False,
             start_new_session=True,  # POSIX: own process group for tree kill
+            **popen_kwargs,
         )
         if os.name == "nt":
             try:
                 job = _WindowsJob()
-                job.set_kill_on_job_close()
-                job.assign(process._handle)  # the raw child handle
+                try:
+                    job.set_kill_on_job_close()
+                    job.assign(process._handle)  # the raw child handle
+                    _resume_process(process._handle)
+                except OSError:
+                    job.close()
+                    job = None
+                    raise
             except OSError:
-                job = None  # best effort: POSIX-style kill still applies
+                # Containment could not be armed: fail closed. The child is
+                # killed (still suspended or uncontained) and the completion
+                # is explicitly unknown — never a silent best-effort success
+                # with descendants outside the job (ADR 0005, ADR 0012).
+                _terminate_tree(process)
+                return RunnerResult(outcome="unknown", failure_code="spawn-failure")
         limit = profile.output_limit
         overflow: dict[str, bool] = {"stdout": False, "stderr": False}
 
@@ -600,7 +647,14 @@ def run_staged(
         return RunnerResult(outcome="failure", failure_code="non-zero-exit")
     finally:
         if job is not None:
-            job.close()  # kill-on-job-close terminates any survivor
+            # Terminate, then hold the return until the job reports no
+            # active processes: kill-on-close/termination is asynchronous,
+            # and no in-job descendant may outlive the observed outcome.
+            job.terminate()
+            _await_tree_exit(process, job)
+            job.close()  # kill-on-job-close as the backstop
+        elif process is not None:
+            _await_tree_exit(process, None)
         import shutil
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -632,3 +686,47 @@ def _terminate_tree(process: subprocess.Popen) -> None:
         process.wait(timeout=10)
     except subprocess.TimeoutExpired:
         pass
+
+
+def _resume_process(process_handle: Any) -> None:
+    """Resume every thread of a CREATE_SUSPENDED child (Windows).
+
+    The staged child is created suspended so it can be assigned to the
+    Job Object before it executes a single instruction; this resumes it
+    once the job is armed. NtResumeProcess (ntdll) resumes the whole
+    process without walking a thread snapshot, which is unreliable
+    across Windows builds."""
+    import ctypes
+
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+    status = ntdll.NtResumeProcess(ctypes.c_void_p(int(process_handle)))
+    if status != 0:
+        raise OSError(f"NtResumeProcess failed (NTSTATUS {status:#x})")
+
+
+def _await_tree_exit(
+    process: subprocess.Popen,
+    job: "_WindowsJob | None",
+    timeout: float = 5.0,
+) -> None:
+    """Best-effort wait until the killed tree is actually gone before the
+    runner returns: job termination and killpg are asynchronous, and the
+    contract is that no in-job (or in-group) descendant outlives the
+    dispatch outcome the caller observes. A failed drain query degrades
+    to returning after the deadline without changing the outcome."""
+    deadline = time.monotonic() + timeout
+    if job is not None:
+        while time.monotonic() < deadline:
+            active = job.active_processes()
+            if active is None or active == 0:
+                return
+            time.sleep(0.05)
+        return
+    if hasattr(os, "killpg") and hasattr(os, "setsid"):
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(process.pid, 0)
+            except OSError:
+                return  # the whole group is gone
+            time.sleep(0.05)

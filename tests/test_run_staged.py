@@ -33,6 +33,25 @@ PROFILE = RunnerProfile(
 )
 
 
+def _process_alive(pid: int) -> bool:
+    """Windows liveness via GetExitCodeProcess: a terminated process's
+    object can linger while kernel references drain, so OpenProcess alone
+    cannot distinguish terminated from still running."""
+    import ctypes
+
+    STILL_ACTIVE = 259
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return False  # object gone: dead
+    try:
+        code = ctypes.c_ulong()
+        if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False  # unqueryable: treat as gone
+        return code.value == STILL_ACTIVE
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
 def _with_hash(profile: RunnerProfile) -> RunnerProfile:
     from dataclasses import replace
 
@@ -354,14 +373,12 @@ def test_pipe_holding_grandchild_maps_to_unknown(tmp_path) -> None:
     """A grandchild that inherits the pipes and outlives the direct child
     maps to explicitly unknown, never success."""
     import hashlib as hl
-    import subprocess as sp
     import time as tm
     from dataclasses import replace
 
     from ops_guard.execution_binding import RunnerProfile, run_staged
 
-    marker = tmp_path / "grandchild-alive"
-    marker.write_text("alive")
+    marker = tmp_path / "grandchild.pid"
     profile = replace(
         RunnerProfile(
             profile_id="pipe-holder",
@@ -374,19 +391,20 @@ def test_pipe_holding_grandchild_maps_to_unknown(tmp_path) -> None:
             output_limit=1024,
         ),
     )
-    spawn_line = (
-        "import time; time.sleep(30)"
-    )
-    spawn = (
+    # The GRANDCHILD records its own pid: the fixture cannot race its spawn
+    # from the test process. It inherits the middle child's stdio, which is
+    # explicitly redirected to the runner's pipes.
+    grandchild_code = "import time; time.sleep(30)"
+    middle = (
         "import subprocess, sys\n"
-        f"subprocess.Popen([{sys.executable!r}, '-c', {spawn_line!r}])\n"
+        f"g = subprocess.Popen([{sys.executable!r}, '-c', {grandchild_code!r}])\n"
+        f"open({str(marker)!r}, 'w').write(str(g.pid))\n"
         "sys.exit(0)\n"
     )
-    inner = f"import subprocess, sys; {spawn_line!r}"
     body = (
         "import subprocess, sys\n"
-        f"child = subprocess.Popen([{sys.executable!r}, '-c', {inner!r}],\n"
-        "    stdout=sys.stdout, stderr=sys.stderr)\n"
+        f"c = subprocess.Popen([{sys.executable!r}, '-c', {middle!r}],\n"
+        "    stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr)\n"
         "sys.exit(0)\n"
     ).encode()
     started = tm.monotonic()
@@ -399,12 +417,21 @@ def test_pipe_holding_grandchild_maps_to_unknown(tmp_path) -> None:
     )
     elapsed = tm.monotonic() - started
     assert result.outcome == "unknown"  # explicitly unknown, never success
+    assert result.failure_code is None  # plain still-open, no overflow
     assert elapsed < 15
-    # the tree is terminated: the grandchild dies shortly after
-    deadline = tm.monotonic() + 5
-    while tm.monotonic() < deadline and marker.exists():
+    # the tree is terminated: the grandchild is gone shortly after
+    deadline = tm.monotonic() + 10
+    while tm.monotonic() < deadline and not marker.exists():
         tm.sleep(0.1)
-    assert not marker.exists(), "grandchild survived the tree kill"
+    grandchild_pid = int(marker.read_text())
+    while tm.monotonic() < deadline:
+        try:
+            os.kill(grandchild_pid, 0)
+        except OSError:
+            break  # process gone
+        tm.sleep(0.1)
+    with pytest.raises(OSError):
+        os.kill(grandchild_pid, 0)
 
 
 def test_taskkill_timeout_still_kills_direct_child(tmp_path, monkeypatch) -> None:
@@ -491,19 +518,15 @@ def test_job_object_kills_surviving_grandchild(tmp_path) -> None:
         script_sha256=hl.sha256(body).hexdigest(),
         invocation={"action": "restart"},
     )
-    assert result.outcome in ("unknown", "failure")
+    assert result.outcome == "unknown"  # explicitly unknown, never success
+    assert result.failure_code is None
     grandchild_pid = int(marker.read_text())
-    import ctypes
-
-    deadline = tm.monotonic() + 10
-    while tm.monotonic() < deadline:
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
-        if not handle:
-            break  # process gone
-        ctypes.windll.kernel32.CloseHandle(handle)
-        tm.sleep(0.1)
-    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
-    assert not handle, "grandchild survived the Job Object kill"
+    # Drain-before-return: the job is terminated and drained inside
+    # run_staged, so the grandchild is already terminated at the instant
+    # the runner returns — no grace poll.
+    assert not _process_alive(grandchild_pid), (
+        "grandchild still running past run_staged's return"
+    )
 
 
 def test_detached_grandchild_killed_by_job_close(tmp_path) -> None:
@@ -551,17 +574,46 @@ def test_detached_grandchild_killed_by_job_close(tmp_path) -> None:
     # detection does NOT fire: the clean child exit maps to success, and
     # kill-on-close must have terminated the surviving grandchild.
     assert result.outcome == "success"
-    import ctypes
-
     deadline = tm.monotonic() + 10
     while tm.monotonic() < deadline and not marker.exists():
         tm.sleep(0.1)
     grandchild_pid = int(marker.read_text())
-    while tm.monotonic() < deadline:
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
-        if not handle:
-            break  # process gone
-        ctypes.windll.kernel32.CloseHandle(handle)
-        tm.sleep(0.1)
-    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
-    assert not handle, "grandchild survived the Job Object kill"
+    # Drain-before-return contract: the job is terminated and drained
+    # inside run_staged, so the grandchild is already terminated at the
+    # instant the runner returns — no grace poll.
+    assert not _process_alive(grandchild_pid), (
+        "grandchild still running past run_staged's return"
+    )
+
+
+def test_arming_failure_fails_closed(tmp_path, monkeypatch) -> None:
+    """If the Job Object cannot be armed, run_staged kills the child and
+    reports explicitly unknown with spawn-failure — never a success with
+    uncontained descendants (ADR 0012 containment hardening)."""
+    import hashlib as hl
+    from dataclasses import replace
+
+    import ops_guard.execution_binding as eb
+
+    if os.name != "nt":
+        pytest.skip("Job Objects are Windows-specific")
+    profile = replace(
+        PROFILE,
+        working_directory=str(tmp_path),
+        executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+    )
+
+    def boom(self, handle):
+        raise OSError("AssignProcessToJobObject failed")
+
+    monkeypatch.setattr(eb._WindowsJob, "assign", boom)
+    body = _fixture("import json,sys; sys.exit(0)")
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    assert result.outcome == "unknown"
+    assert result.failure_code == "spawn-failure"

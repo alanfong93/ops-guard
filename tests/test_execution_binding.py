@@ -203,3 +203,36 @@ def test_argv0_mismatch_is_rejected() -> None:
     document["runner_profile"]["argv"] = ["/usr/bin/other", "-c", "pass"]
     with pytest.raises(Exception, match="argv"):
         load_execution_catalog(document)
+
+
+def test_reused_script_id_is_rejected() -> None:
+    """Two entries may not share one script id: the id names exactly one
+    staged artifact identity (ADR 0012)."""
+    from ops_guard.execution_binding import ExecutionCatalogError
+
+    document = catalog_document()
+    second = dict(document["entries"][0])
+    second["action"] = "status"
+    second["script_id"] = document["entries"][0]["script_id"]
+    document["entries"] = [document["entries"][0], second]
+    with pytest.raises(ExecutionCatalogError, match="reuses script_id"):
+        load_execution_catalog(document)
+
+
+def test_duplicate_json_key_is_rejected(tmp_path) -> None:
+    """A catalog file with a duplicated JSON object key is corrupt input,
+    not silently last-one-wins (ADR 0012 strict schema)."""
+    from ops_guard.execution_binding import (
+        ExecutionCatalogError,
+        load_execution_catalog_file,
+    )
+
+    path = tmp_path / "catalog.json"
+    text = json.dumps(catalog_document())
+    duplicated = text.replace(
+        '"entries"', '"schema_version": "ops-guard-execution-catalog-v1", "entries"', 1
+    )
+    path.write_text(duplicated, encoding="utf-8")
+    with pytest.raises(ExecutionCatalogError, match="duplicate JSON key"):
+        load_execution_catalog_file(str(path))
+

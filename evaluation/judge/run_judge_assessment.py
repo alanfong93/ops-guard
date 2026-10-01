@@ -32,8 +32,11 @@ from evaluation.judge.face import EvaluationFace  # noqa: E402
 from local_judge.evidence import run_corpus  # noqa: E402  pinned authoritative runner
 from ops_guard.judge import FIXED_MODEL, MENU, PROMPT_VERSION, RUBRIC_VERSION  # noqa: E402
 
-REPORT_PATH = os.path.join(HERE, "report-v1.json")
+REPORT_PATH = os.path.join(HERE, "report-v2.json")
 TIMEOUT_CODES = {"MODEL_TIMEOUT", "MODEL_UNAVAILABLE", "INVALID_MODEL_OUTPUT", "CONTEXT_LIMIT_EXCEEDED"}
+# A relation needs at least this many answered pairs before its invariance
+# rate can read as a pass (hardening from the #73 review, folded into #74).
+MIN_ANSWERED_PAIRS = 5
 
 
 def load_corpus() -> tuple[dict, list[dict]]:
@@ -130,7 +133,7 @@ def supplemental_full_map(cases: list[dict], face: EvaluationFace) -> dict:
         stats["answered_pairs"] += 1
         if face.full_map_invariance(case["case_id"], partner_id):
             stats["invariant"] += 1
-    return {
+    result = {
         relation: {
             "pairs": stats["pairs"],
             "answered_pairs": stats["answered_pairs"],
@@ -142,10 +145,27 @@ def supplemental_full_map(cases: list[dict], face: EvaluationFace) -> dict:
                 else None
             ),
             "vacuous": stats["answered_pairs"] == 0,
+            # Hardening carried from the #73 review (folded into the #74
+            # plan pass): a relation with too few answered pairs is
+            # underpowered and its rate cannot read as a pass even at 1.0.
+            # `pass` is the pinned consumer predicate: a relation passes
+            # only when it is not vacuous, not underpowered, and `rate` —
+            # never None — is >= `min_required`. `rate: null` and
+            # `vacuous: true` never satisfy the 0.8 bar numerically.
+            "underpowered": stats["answered_pairs"] < MIN_ANSWERED_PAIRS,
+            "min_answered_pairs": MIN_ANSWERED_PAIRS,
             "min_required": 0.8,
         }
         for relation, stats in sorted(relations.items())
     }
+    for entry in result.values():
+        entry["pass"] = bool(
+            not entry["vacuous"]
+            and not entry["underpowered"]
+            and entry["rate"] is not None
+            and entry["rate"] >= entry["min_required"]
+        )
+    return result
 
 
 def run() -> dict:

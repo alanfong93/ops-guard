@@ -54,7 +54,7 @@ FIXED_TIMEOUT_MS = 10000
 
 STATE_SCHEMA_VERSION = "ops-guard-risk-state-v1"
 RUBRIC_VERSION = "ops-guard-risk-rubric-v1"
-PROMPT_VERSION = "ops-guard-risk-prompt-v1"
+PROMPT_VERSION = "ops-guard-risk-prompt-v2"
 PROJECTION_SCHEMA_VERSION = "ops-guard-risk-projection-v1"
 RISK_QUESTION_ID = "risk_class"
 
@@ -64,9 +64,22 @@ MENU: dict[str, str] = {
     "critical": "Plausible severe, destructive, security, availability, or irreversible impact.",
 }
 
+# v2 (issue #74 corrective): the pinned sample union offers the answer as a
+# bare JSON string or an inability object, and qwen3's shape preference made
+# it take the object exit on every input — even decisive states. v1's
+# instructions never told the model which shape to emit. v2 makes the format
+# explicit and reserves the inability object for genuinely unreadable or
+# self-contradictory states; evaluation report-v2 (issue #74) is the
+# evidence gate for this version.
 _RISK_INSTRUCTIONS = (
-    "Classify the operational risk of the proposed invocation, given the cited "
-    "verified procedure and the invocation itself. Select exactly one risk class."
+    "Classify the operational risk of the proposed invocation from the cited "
+    "verified procedure and the invocation itself, and select exactly one "
+    "risk class from the menu. Your entire output MUST be a bare JSON string "
+    "— one of the menu's option ids — never an object. Reserve the inability "
+    "object exclusively for a state that is literally unreadable or "
+    "self-contradictory: incomplete-feeling context, an irreversible or "
+    "destructive operation, or a merely consequential decision is never a "
+    "reason to abstain — decide."
 )
 
 # Closed projection failure codes (ADR 0009). No exception text is stored.

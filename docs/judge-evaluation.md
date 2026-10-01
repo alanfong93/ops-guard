@@ -1,13 +1,17 @@
-# Judge risk-rubric evaluation (corpus v1, report v1)
+# Judge risk-rubric evaluation (corpus v1, reports v1 and v2)
 
-This is the S7-6 measurement (issue #60): does the advisory local risk
-rubric (`routine` / `review` / `critical`, [ADR 0009](adr/0009-local-advisory-judge-audit-projection.md))
+This is the S7-6 measurement (issue #60, re-evaluated by the issue #74
+corrective): does the advisory local risk rubric (`routine` / `review` /
+`critical`, [ADR 0009](adr/0009-local-advisory-judge-audit-projection.md))
 demonstrate usefulness on the pinned model profile before any caller ever
 sees a label?
 
-**Outcome: the report FAILED. `demonstrated_usefulness: false`. The judge
-advisory remains audit-only and S7-7 (issue #65) stays blocked.** A failed
-report is a valid evaluation outcome, not a broken gate.
+**Outcome: both reports FAILED. `demonstrated_usefulness: false` in
+report-v1 and in report-v2. The judge advisory remains audit-only and
+S7-7 (issue #65) stays blocked.** A failed report is a valid evaluation
+outcome, not a broken gate. Report-v2 (prompt v2) is major progress over
+report-v1 — three of five gates now pass — but the two remaining gates
+fail on model capability, not on format.
 
 ## Configuration under test (all fixed, none caller-controlled)
 
@@ -19,7 +23,7 @@ report is a valid evaluation outcome, not a broken gate.
   gate implementation.
 - Fixed: 3 sequential samples, temperature 0, `timeout_ms=10000`,
   identifiers `ops-guard-risk-state-v1` / `ops-guard-risk-rubric-v1` /
-  `ops-guard-risk-prompt-v1`, menu definitions from ADR 0009.
+  `ops-guard-risk-prompt-v2` (issue #74 corrective; v1 abstained on every input under the sample union), menu definitions from ADR 0009.
 - Corpus: `evaluation/judge/manifest.json` (`ops-guard-judge-corpus-v1`),
   256 cases — 6 deterministic fixtures (one per contract category), 50
   labelled normal, 20 ambiguous (explicit allowed-answer sets), 20
@@ -72,17 +76,55 @@ The first two points together indicate the failure is an interaction
 between the fixed prompt/schema configuration and this small model, not a
 property of the risk rubric itself.
 
+## Re-evaluation (report-v2.json, issue #74 corrective, prompt v2, 103 s)
+
+The #74 corrective settled direction 1 — revised caller-declared
+instructions under the bumped `ops-guard-risk-prompt-v2`. Probes
+root-caused v1's abstention: the sample union offers the answer as a
+**bare JSON string** or an inability **object**, and constrained decoding
+makes a small model prefer the object shape; the model was shape-driven,
+not semantically unable. v2 states the format explicitly (bare-string
+output; the inability object reserved for literally unreadable or
+self-contradictory states) and the same model answers through the
+unchanged union and unchanged pinned library.
+
+| Gate | report-v1 | report-v2 |
+|---|---|---|
+| deterministic_fixtures | pass | **pass** |
+| normal_cases | fail (0/50 answered) | **pass** (accuracy 1.0) |
+| ambiguous_cases | fail | **pass** (coverage 1.0) |
+| adversarial_matched_pairs | fail | **fail in both runs** — task preservation 0.75 / 0.737 (needs ≥ 0.9), drop 25–26 pp (needs ≤ 10) |
+| metamorphic_invariance | fail | pass on the declared run (all four relations 1.0) — but **unstable**: an earlier live run of the identical configuration scored irrelevant-evidence-insertion 0.65 |
+
+`demonstrated_usefulness` stays **false**: the adversarial gate fails in
+every run — the model drops ~25 accuracy points under role-spoofing and
+sibling vectors, a stable capability limit of the pinned 8B model. Two
+findings from probing are recorded as evidence, not claims: (1) v1's
+abstention was shape-driven (fixed by v2's explicit format instructions);
+(2) irrelevant-evidence invariance at temperature 0 is not stable for
+this model — identical configuration scored 0.65 and 1.0 across runs —
+so no robustness claim is made from either number. Under the same union,
+every locally available model reproduces the shape-driven inability exit
+(`qwen3:8b`, `huihui_ai/qwen3.5-abliterated:4b`, `gemma4:e4b`), so
+direction 2 has no local candidate; a larger or non-local judge model is
+an operator decision (cost and locality trade against the frozen local
+profile) and remains the next re-plan lever.
+
+The #73-review hardening is folded into the runner: each full-map
+relation now reports `underpowered` below five answered pairs, and the
+pinned consumer semantics state that `rate: null` or `vacuous: true`
+never satisfies the 0.8 bar numerically.
+
 ## Consequences
 
 - No label may be surfaced to any caller; `propose_fix` continues to
-  record audit-only advisory results (all typed failures today).
+  record audit-only advisory results (the judge now answers, but the
+  gate contract requires a full pass).
 - Issue #65 (S7-7, advisory in the proposal response) stays blocked.
-- A corrective/re-evaluation issue is filed with this diagnosis; candidate
-  directions there include revising the caller-declared instructions under
-  a bumped prompt version (via plan-loop, since #58 froze them), trying a
-  model whose constrained decoding tolerates the sample union, or raising
-  the fixed per-sample budget to permit thinking mode — each is a new
-  plan decision, not an inline change.
+- The next re-plan lever is direction 2 with a non-local (or larger)
+  judge model — an operator decision on cost and locality; direction 3
+  (thinking budget) is not indicated: thinking is disabled for latency
+  and the model abstained with it enabled anyway.
 
 ## Non-claims
 

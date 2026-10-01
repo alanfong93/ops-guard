@@ -362,6 +362,41 @@ def test_proposal_event_carries_closed_judge_projection(harness) -> None:
     assert "judge" not in json.dumps(payload).lower()
 
 
+def test_judge_error_projection_with_null_fingerprint_still_mints(harness, monkeypatch) -> None:
+    """The _run_one guard's judge_error (issue #58 null-trace semantics)
+    with no fingerprint function still mints a proposal carrying the
+    closed projection (#72)."""
+    import ops_guard.judge as judge_module
+    from ops_guard.judge import LocalJudge
+    from ops_guard.retrieval import build_mcp_server as build
+
+    def exploding(self, envelope, question_id, question):
+        raise RuntimeError("internal explosion")
+
+    monkeypatch.setattr(judge_module.SamplingOrchestrator, "run_question", exploding)
+    from test_judge import FakeTransport
+
+    judge = LocalJudge(
+        transport=FakeTransport(outputs=['"routine"'] * 3), fingerprint=None
+    )
+    original = harness.server
+    harness.server = build(
+        harness.library,
+        harness.audit,
+        proposals=harness.service,
+        proposal_ttl=DEFAULT_TTL,
+        judge=judge,
+    )
+    result = harness.call({"invocation": valid_invocation(), "citation": citation_for()})
+    payload = json.loads(result.content[0].text)
+    assert payload["token"]  # proposal still created
+    snapshot = harness.proposal_events()[-1].judge_snapshot
+    assert snapshot["status"] == "judge_error"
+    assert snapshot["trace_id"] is None
+    assert snapshot["request_fingerprint"] is None
+    assert original is not None
+
+
 def test_judge_typed_failure_still_creates_the_proposal(harness) -> None:
     def failing(state):
         return {

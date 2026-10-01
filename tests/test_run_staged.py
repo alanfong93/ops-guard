@@ -447,6 +447,7 @@ def test_taskkill_timeout_still_kills_direct_child(tmp_path, monkeypatch) -> Non
     # process.kill() ran as the fallback: the direct child is gone
     assert result.failure_code == "executor-timeout"
 
+
 def test_job_object_kills_surviving_grandchild(tmp_path) -> None:
     """Windows: a grandchild that survives the direct child is terminated by
     the kill-on-close Job Object before run_staged returns (ADR 0012)."""
@@ -504,6 +505,7 @@ def test_job_object_kills_surviving_grandchild(tmp_path) -> None:
     handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
     assert not handle, "grandchild survived the Job Object kill"
 
+
 def test_detached_grandchild_killed_by_job_close(tmp_path) -> None:
     """Windows: kill-on-close (not just TerminateJobObject on the still-open
     path) terminates a detached grandchild that outlives a clean direct
@@ -514,8 +516,16 @@ def test_detached_grandchild_killed_by_job_close(tmp_path) -> None:
 
     if os.name != "nt":
         pytest.skip("Job Objects are Windows-specific")
-    marker = tmp_path / "grandchild-alive"
-    marker.write_text("alive")
+    marker = tmp_path / "grandchild.pid"
+    # the MIDDLE child records the detached grandchild's pid, then exits
+    spawn_line = "import time; time.sleep(30)"
+    inner = (
+        "import subprocess, sys\n"
+        f"grandchild = subprocess.Popen([{sys.executable!r}, '-c', {spawn_line!r}],\n"
+        "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
+        "    stdin=subprocess.DEVNULL)\n"
+        f"open({str(marker)!r}, 'w').write(str(grandchild.pid))\n"
+    )
     profile = RunnerProfile(
         profile_id="detached",
         executable=sys.executable,
@@ -525,8 +535,6 @@ def test_detached_grandchild_killed_by_job_close(tmp_path) -> None:
         env_allowlist=("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC"),
         timeout_seconds=10,
     )
-    spawn_line = "import time; time.sleep(30)"
-    inner = f"import subprocess, sys; subprocess.Popen([{sys.executable!r}, '-c', {spawn_line!r}])"
     body = (
         "import subprocess, sys\n"
         f"subprocess.Popen([{sys.executable!r}, '-c', {inner!r}])\n"
@@ -539,24 +547,21 @@ def test_detached_grandchild_killed_by_job_close(tmp_path) -> None:
         script_sha256=hl.sha256(body).hexdigest(),
         invocation={"action": "restart"},
     )
-    # The detached grandchild inherits the runner's stdio pipes, so the
-    # still-open detection fires: explicitly unknown (ADR 0005), the job is
-    # terminated, and the grandchild dies with the tree.
-    assert result.outcome == "unknown"
+    # The detached grandchild uses DEVNULL stdio, so the still-open
+    # detection does NOT fire: the clean child exit maps to success, and
+    # kill-on-close must have terminated the surviving grandchild.
+    assert result.outcome == "success"
     import ctypes
 
     deadline = tm.monotonic() + 10
-    pid_file = tmp_path / "grandchild-alive"
-    grandchild_pid = None
-    while tm.monotonic() < deadline:
-        try:
-            grandchild_pid = int(pid_file.read_text())
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
-            if not handle:
-                break  # dead
-            ctypes.windll.kernel32.CloseHandle(handle)
-        except (OSError, ValueError):
-            break
+    while tm.monotonic() < deadline and not marker.exists():
         tm.sleep(0.1)
-    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid or 0)
-    assert not handle, "grandchild survived kill-on-close"
+    grandchild_pid = int(marker.read_text())
+    while tm.monotonic() < deadline:
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
+        if not handle:
+            break  # process gone
+        ctypes.windll.kernel32.CloseHandle(handle)
+        tm.sleep(0.1)
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
+    assert not handle, "grandchild survived the Job Object kill"

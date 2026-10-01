@@ -485,6 +485,16 @@ def run_staged(
         writer.join(timeout=5)
         for reader in readers:
             reader.join(timeout=5)
+        still_open = (
+            writer.is_alive() or any(reader.is_alive() for reader in readers)
+        )
+        if still_open:
+            # A descendant holds the inherited stdio pipes: the tree is not
+            # done even though the direct child exited. Terminate it and
+            # report an explicitly unknown completion (ADR 0005).
+            _terminate_tree(process)
+            code = "output-limit" if (overflow["stdout"] or overflow["stderr"]) else None
+            return RunnerResult(outcome="unknown", failure_code=code)
         if overflow["stdout"] or overflow["stderr"]:
             return RunnerResult(outcome="failure", failure_code="output-limit")
         if process.returncode == 0:
@@ -517,7 +527,7 @@ def _terminate_tree(process: subprocess.Popen) -> None:
     except OSError:
         process.kill()
     except subprocess.TimeoutExpired:
-        pass
+        process.kill()
     try:
         process.wait(timeout=10)
     except subprocess.TimeoutExpired:

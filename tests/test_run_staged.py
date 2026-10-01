@@ -336,3 +336,111 @@ def test_illegal_runner_outcome_records_failure(tmp_path, monkeypatch) -> None:
     assert len(events) == 1
     assert events[0].outcome == "failure"
     assert events[0].failure_code == "executor-error"
+
+# ---- pipe-holding grandchild and taskkill fallback (review cycle 4) ------
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "Windows handle-inheritance semantics for the grandchild are not "
+        "deterministic here; the still_open safety net is exercised on POSIX "
+        "(ADR 0012 amendment documents the Windows limitation)"
+    ),
+)
+def test_pipe_holding_grandchild_maps_to_unknown(tmp_path) -> None:
+    """A grandchild that inherits the pipes and outlives the direct child
+    maps to explicitly unknown, never success."""
+    import hashlib as hl
+    import subprocess as sp
+    import time as tm
+    from dataclasses import replace
+
+    from ops_guard.execution_binding import RunnerProfile, run_staged
+
+    marker = tmp_path / "grandchild-alive"
+    marker.write_text("alive")
+    profile = replace(
+        RunnerProfile(
+            profile_id="pipe-holder",
+            executable=sys.executable,
+            executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+            argv=(sys.executable,),
+            working_directory=str(tmp_path),
+            env_allowlist=("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC"),
+            timeout_seconds=10,
+            output_limit=1024,
+        ),
+    )
+    spawn_line = (
+        "import time; time.sleep(30)"
+    )
+    spawn = (
+        "import subprocess, sys\n"
+        f"subprocess.Popen([{sys.executable!r}, '-c', {spawn_line!r}])\n"
+        "sys.exit(0)\n"
+    )
+    inner = f"import subprocess, sys; {spawn_line!r}"
+    body = (
+        "import subprocess, sys\n"
+        f"child = subprocess.Popen([{sys.executable!r}, '-c', {inner!r}],\n"
+        "    stdout=sys.stdout, stderr=sys.stderr)\n"
+        "sys.exit(0)\n"
+    ).encode()
+    started = tm.monotonic()
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    elapsed = tm.monotonic() - started
+    assert result.outcome == "unknown"  # explicitly unknown, never success
+    assert elapsed < 15
+    # the tree is terminated: the grandchild dies shortly after
+    deadline = tm.monotonic() + 5
+    while tm.monotonic() < deadline and marker.exists():
+        tm.sleep(0.1)
+    assert not marker.exists(), "grandchild survived the tree kill"
+
+
+def test_taskkill_timeout_still_kills_direct_child(tmp_path, monkeypatch) -> None:
+    """If taskkill times out, process.kill still runs as the fallback."""
+    import hashlib as hl
+    import subprocess as sp
+    import time as tm
+    from dataclasses import replace
+
+    from ops_guard.execution_binding import RunnerProfile, run_staged
+
+    profile = replace(
+        RunnerProfile(
+            profile_id="slow-kill",
+            executable=sys.executable,
+            executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+            argv=(sys.executable,),
+            working_directory=str(tmp_path),
+            env_allowlist=("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC"),
+            timeout_seconds=1,
+        ),
+    )
+    body = _fixture("import time; time.sleep(10)")
+    kill_calls = []
+
+    def fake_run(cmd, **kwargs):
+        kill_calls.append(cmd)
+        raise sp.TimeoutExpired(cmd=cmd, timeout=10)
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=_fixture("import time; time.sleep(10)"),
+        script_sha256=hl.sha256(_fixture("import time; time.sleep(10)")).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    assert result.outcome == "unknown"
+    assert any("taskkill" in str(c) for c in kill_calls)
+    # process.kill() ran as the fallback: the direct child is gone
+    assert result.failure_code == "executor-timeout"

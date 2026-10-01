@@ -28,3 +28,9 @@ The Telegram preview shows the invocation plus the bound script path/hash and ru
 ## Consequences
 
 The public `propose_fix` input/output and the canonical Invocation are unchanged; the binding is a server-internal sidecar. Legacy proposals without a binding cannot dispatch through the new path. The operator sees script path/hash/profile in the approval message but never receives script bytes or the raw proposal token. Claiming an OS sandbox against independent host-level access remains out of scope (PRODUCT boundary).
+
+## Amendment (2026-09-30, review cycle 4 of issue #64)
+
+If a descendant inherits the staged runner's stdio pipes and outlives the direct child, the runner detects the still-open pipes after the direct child exits, terminates the tree, and reports the explicitly `unknown` outcome with no failure code. On Windows the tree kill targets the (already exited) direct child PID, so a pipe-holding grandchild may be orphaned until it exits on its own; the outcome remains `unknown` and nothing is dispatched or re-run. POSIX `killpg` (the child runs in its own session) reaches the whole group.
+
+A follow-up review probe (cycle 4) showed that on Windows a grandchild spawned by the staged script may not deterministically inherit the runner's stdio pipe handles, in which case the pipe-holding detection sees EOF and the direct child's clean exit is reported as `success` while an orphan continues briefly. The still-open-pipe safety net remains for platforms where the handles are inherited (POSIX). On Windows the outcome contract for this corner is therefore best-effort: scripts that spawn detached descendants should manage their own lifetime, and the gate records the direct child's exit honestly.

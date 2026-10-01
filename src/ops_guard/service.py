@@ -231,7 +231,10 @@ def _operator_script_source(path: str) -> bytes:
         return handle.read()
 
 
-def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog, ProposalService]:
+def build_http_server(
+    config: ServiceConfig,
+    operator_policy=None,
+) -> tuple[object, AuditLog, ProposalService]:
     """Assemble the service: runbooks, audit/proposal initialization on the
     shared database, crash reconciliation, then the retrieval-only MCP app
     behind bearer auth and Host/Origin protection. Nothing binds here."""
@@ -299,7 +302,13 @@ def build_http_server(config: ServiceConfig) -> tuple[object, AuditLog, Proposal
                 "OPS_GUARD_EXECUTION_CATALOG is set"
             )
         observer_registry = default_registry()
-        operator_policy = load_policy_file(policy_path, observer_registry)
+        if operator_policy is None:
+            try:
+                operator_policy = load_policy_file(policy_path, observer_registry)
+            except ProposalError as error:
+                raise StartupError(
+                    f"OPS_GUARD_POLICY_FILE: {error}"
+                ) from error
         gate = ExecutionGate(
             proposals,
             ApprovalVerifier(
@@ -411,8 +420,16 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     environment = os.environ if environ is None else environ
     try:
         config = load_config(environment)
-        app, audit, proposals = build_http_server(config)
-    except (ConfigurationError, StartupError, GateConfigurationError) as error:
+        from ops_guard.preconditions import default_registry, load_policy_file
+
+        policy_path = environment.get("OPS_GUARD_POLICY_FILE")
+        operator_policy = (
+            load_policy_file(policy_path, default_registry())
+            if policy_path
+            else None
+        )
+        app, audit, proposals = build_http_server(config, operator_policy)
+    except (ConfigurationError, StartupError, GateConfigurationError, ProposalError) as error:
         print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
         return 2
     try:
@@ -420,21 +437,6 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
     except ApprovalConfigError as error:
         print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
         return 2
-    # Operator policy (issue #62; ADR 0011): validated once per server
-    # start, fail-closed on any error — even when no execution catalog is
-    # wired, so a bad policy never reaches a listening server.
-    policy_path = environment.get("OPS_GUARD_POLICY_FILE")
-    if policy_path:
-        from ops_guard.preconditions import default_registry, load_policy_file
-
-        try:
-            policy = load_policy_file(policy_path, default_registry())
-        except ProposalError as error:
-            print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
-            return 2
-        print(
-            f"[ops-guard] operator policy loaded (digest {policy.digest[:16]}...)", flush=True
-        )
     if runtime is not None:
         runtime.start()
         print("[ops-guard] approval transport enabled (Telegram, private operator DM)", flush=True)

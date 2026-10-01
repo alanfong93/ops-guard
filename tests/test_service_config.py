@@ -202,3 +202,58 @@ def test_tls_startup_error_carries_underlying_message(tmp_path) -> None:
     # text but not the filename), plus the cause's type name
     assert "No such file or directory" in message
     assert type(raised.value.__cause__).__name__ in message
+
+
+def _write_pem(tmp_path, *, name: str, **kwargs) -> tuple[str, str]:
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    common = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(common)
+        .issuer_name(common)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    cert_path = tmp_path / f"{name}.pem"
+    key_path = tmp_path / f"{name}-key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return str(cert_path), str(key_path)
+
+
+def test_valid_tls_pair_loads(tmp_path) -> None:
+    from ops_guard.service import StartupError  # noqa: F401  (contract: typed startup errors)
+
+    cert_path, key_path = _write_pem(tmp_path, name="pair")
+    context = validate_tls_pair(cert_path, key_path)
+    assert isinstance(context, ssl.SSLContext)
+
+
+def test_mismatched_certificate_and_key_fail_validation(tmp_path) -> None:
+    from ops_guard.service import StartupError
+
+    cert_a, key_a = _write_pem(tmp_path, name="a")
+    cert_b, key_b = _write_pem(tmp_path, name="b")
+    with pytest.raises(StartupError) as raised:
+        validate_tls_pair(cert_a, key_b)
+    message = str(raised.value)
+    assert "OPS_GUARD_TLS_CERTFILE / OPS_GUARD_TLS_KEYFILE" in message
+    assert "key values mismatch" in message
+    assert type(raised.value.__cause__).__name__ == "SSLError"

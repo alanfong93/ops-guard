@@ -429,6 +429,11 @@ def main(argv: list[str] | None = None, environ: Mapping[str, str] | None = None
             else None
         )
         app, audit, proposals = build_http_server(config, operator_policy)
+        if operator_policy is not None:
+            print(
+                f"[ops-guard] operator policy loaded (digest {operator_policy.digest[:16]}...)",
+                flush=True,
+            )
     except (ConfigurationError, StartupError, GateConfigurationError, ProposalError) as error:
         print(f"[ops-guard] startup failed: {error}", file=sys.stderr)
         return 2

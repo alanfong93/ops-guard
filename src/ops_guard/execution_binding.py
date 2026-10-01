@@ -384,7 +384,89 @@ class RunnerResult:
     failure_code: str | None
 
 
+
+
+class _WindowsJob:
+    """A Windows Job Object with kill-on-job-close (issue #64; ADR 0012).
+
+    Assigning the staged child to the job means every descendant it spawns
+    is terminated when the job is closed — closing the tree-kill gap where
+    a pipe-holding grandchild outlives an already-exited direct child.
+    Implemented with stdlib ctypes; no new dependency."""
+
+    def __init__(self) -> None:
+        import ctypes
+
+        self._kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        self._handle = self._kernel32.CreateJobObjectW(None, None)
+        if not self._handle:
+            raise OSError("CreateJobObjectW failed")
+
+    def set_kill_on_job_close(self) -> None:
+        import ctypes
+
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9  # JobObjectExtendedLimitInformation
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in (
+                "ReadOperationCount", "WriteOperationCount",
+                "OtherOperationCount", "ReadTransferCount",
+                "WriteTransferCount", "OtherTransferCount")]
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.POINTER(ctypes.c_ulonglong)),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        result = self._kernel32.SetInformationJobObject(
+            self._handle,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not result:
+            raise OSError("SetInformationJobObject failed")
+
+    def assign(self, process_handle) -> None:
+        if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
+            raise OSError("AssignProcessToJobObject failed")
+
+    def terminate(self) -> None:
+        import ctypes
+
+        self._kernel32.TerminateJobObject(self._handle, 1)
+
+    def close(self) -> None:
+        import ctypes
+
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+
 def run_staged(
+
     profile: RunnerProfile,
     *,
     script_path: str,
@@ -442,6 +524,14 @@ def run_staged(
             shell=False,
             start_new_session=True,  # POSIX: own process group for tree kill
         )
+        job = None
+        if os.name == "nt":
+            try:
+                job = _WindowsJob()
+                job.set_kill_on_job_close()
+                job.assign(process._handle)  # the raw child handle
+            except OSError:
+                job = None  # best effort: POSIX-style kill still applies
         limit = profile.output_limit
         overflow: dict[str, bool] = {"stdout": False, "stderr": False}
 
@@ -479,8 +569,12 @@ def run_staged(
             process.wait(timeout=profile.timeout_seconds)
         except subprocess.TimeoutExpired:
             _terminate_tree(process)
+            if job:
+                job.terminate()
             return RunnerResult(outcome="unknown", failure_code="executor-timeout")
         except OSError:
+            if job:
+                job.terminate()
             return RunnerResult(outcome="unknown", failure_code="spawn-failure")
         writer.join(timeout=5)
         for reader in readers:
@@ -491,8 +585,12 @@ def run_staged(
         if still_open:
             # A descendant holds the inherited stdio pipes: the tree is not
             # done even though the direct child exited. Terminate it and
-            # report an explicitly unknown completion (ADR 0005).
+            # report an explicitly unknown completion (ADR 0005). On Windows
+            # the Job Object closes every descendant; on POSIX killpg reaches
+            # the process group.
             _terminate_tree(process)
+            if job:
+                job.terminate()
             code = "output-limit" if (overflow["stdout"] or overflow["stderr"]) else None
             return RunnerResult(outcome="unknown", failure_code=code)
         if overflow["stdout"] or overflow["stderr"]:
@@ -501,6 +599,8 @@ def run_staged(
             return RunnerResult(outcome="success", failure_code=None)
         return RunnerResult(outcome="failure", failure_code="non-zero-exit")
     finally:
+        if job is not None:
+            job.close()  # kill-on-job-close terminates any survivor
         import shutil
 
         shutil.rmtree(tmp_dir, ignore_errors=True)

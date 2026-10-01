@@ -187,3 +187,19 @@ def test_approve_by_proposal_id_binds_execution_binding_digest(tmp_path) -> None
     assert record.execution_binding_digest == binding.digest()
     decision = verifier.verify(issued.token, operator_identity=OPERATOR)
     assert decision.allowed
+
+def test_relative_executable_is_rejected() -> None:
+    """ADR 0012: the profile executable must be an absolute path."""
+    document = catalog_document()
+    document["runner_profile"]["executable"] = "python3"
+    document["runner_profile"]["argv"] = ["python3", "-c", "pass"]
+    with pytest.raises(Exception, match="absolute path"):
+        load_execution_catalog(document)
+
+
+def test_argv0_mismatch_is_rejected() -> None:
+    """argv[0] must name the profile executable (ADR 0012)."""
+    document = catalog_document()
+    document["runner_profile"]["argv"] = ["/usr/bin/other", "-c", "pass"]
+    with pytest.raises(Exception, match="argv"):
+        load_execution_catalog(document)

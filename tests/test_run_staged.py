@@ -343,9 +343,11 @@ def test_illegal_runner_outcome_records_failure(tmp_path, monkeypatch) -> None:
 @pytest.mark.skipif(
     os.name == "nt",
     reason=(
-        "Windows handle-inheritance semantics for the grandchild are not "
-        "deterministic here; the still_open safety net is exercised on POSIX "
-        "(ADR 0012 amendment documents the Windows limitation)"
+        "On Windows the grandchild spawned by the middle child does not "
+        "deterministically inherit the runner's pipe handles (PEP 446 "
+        "non-inheritable handles), so the EOF/pipe-held distinction cannot "
+        "be driven from the fixture; the Job Object guarantee is covered by "
+        "test_job_object_kills_surviving_grandchild (ADR 0012 amendment)"
     ),
 )
 def test_pipe_holding_grandchild_maps_to_unknown(tmp_path) -> None:
@@ -444,3 +446,60 @@ def test_taskkill_timeout_still_kills_direct_child(tmp_path, monkeypatch) -> Non
     assert any("taskkill" in str(c) for c in kill_calls)
     # process.kill() ran as the fallback: the direct child is gone
     assert result.failure_code == "executor-timeout"
+
+def test_job_object_kills_surviving_grandchild(tmp_path) -> None:
+    """Windows: a grandchild that survives the direct child is terminated by
+    the kill-on-close Job Object before run_staged returns (ADR 0012)."""
+    import hashlib as hl
+    import subprocess as sp
+    import time as tm
+    from dataclasses import replace
+
+    from ops_guard.execution_binding import RunnerProfile, run_staged
+
+    if os.name != "nt":
+        pytest.skip("Job Objects are Windows-specific")
+    marker = tmp_path / "grandchild-alive"
+    marker.write_text("alive")
+    profile = replace(
+        RunnerProfile(
+            profile_id="jobbed",
+            executable=sys.executable,
+            executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+            argv=(sys.executable,),
+            working_directory=str(tmp_path),
+            env_allowlist=("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC"),
+            timeout_seconds=10,
+        ),
+    )
+    # The grandchild inherits the child's stdout (the runner's pipe): the
+    # still-open detection fires, the job closes, and the grandchild dies.
+    # The grandchild writes its PID so the test can poll its liveness.
+    body = (
+        "import subprocess, sys\n"
+        f"pid_file = {str(marker)!r}\n"
+        f"grandchild = subprocess.Popen([{sys.executable!r}, '-c', "
+        "'import time; time.sleep(30)'])\n"
+        "open(pid_file, 'w').write(str(grandchild.pid))\n"
+        "sys.exit(0)\n"
+    ).encode()
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    assert result.outcome in ("unknown", "failure")
+    grandchild_pid = int(marker.read_text())
+    import ctypes
+
+    deadline = tm.monotonic() + 10
+    while tm.monotonic() < deadline:
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
+        if not handle:
+            break  # process gone
+        ctypes.windll.kernel32.CloseHandle(handle)
+        tm.sleep(0.1)
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
+    assert not handle, "grandchild survived the Job Object kill"

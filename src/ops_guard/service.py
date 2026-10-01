@@ -31,10 +31,11 @@ from local_judge.ollama import UrllibOllamaTransport
 from ops_guard.audit import AuditLog, AuditStore
 from ops_guard.errors import ProposalError
 from ops_guard.gate import ExecutionGate, GateConfigurationError
+from ops_guard.owner import owners_dir_for
 from ops_guard.proposal_tool import DEFAULT_PROPOSAL_TTL_SECONDS
 from ops_guard.telegram_approval import ApprovalConfigError
 from ops_guard.proposals import ProposalService, default_clock
-from ops_guard.recovery import reconcile_interrupted_executions
+from ops_guard.recovery import reconcile_interrupted_executions, sweep_exec_tmp_leftovers
 from ops_guard.retrieval import RunbookLibrary, build_mcp_server
 from ops_guard.store import ProposalStore
 
@@ -273,6 +274,13 @@ def build_http_server(
         f"{counts.get('indeterminate', 0)} indeterminate",
         flush=True,
     )
+    swept = sweep_exec_tmp_leftovers(owners_dir_for(config.db_path))
+    if swept:
+        print(
+            f"[ops-guard] swept {len(swept)} crash-leftover staging dir(s) "
+            "of owner-proven-dead gates",
+            flush=True,
+        )
 
     verifier = StaticBearerVerifier(config.bearer_token)
     from ops_guard.approvals import ApprovalStore, ApprovalVerifier

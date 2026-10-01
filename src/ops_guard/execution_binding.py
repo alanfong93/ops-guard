@@ -501,6 +501,7 @@ def run_staged(
     script_bytes: bytes,
     script_sha256: str,
     invocation: Any,
+    owner_id: str | None = None,
 ) -> RunnerResult:
     """Stage the verified bytes and execute only the staged copy.
 
@@ -511,7 +512,9 @@ def run_staged(
     Invocation JSON on stdin, a bounded environment, bounded output, and a
     hard child-process timeout with process-tree termination. Timeouts and
     uncertain completions map to the explicitly `unknown` outcome (ADR
-    0005); nothing retries."""
+    0005); nothing retries. The staging directory name carries the owning
+    gate's owner id, so a crash leftover is attributable and a startup
+    sweep can remove it once that owner is proven dead (ADR 0012)."""
     staged_digest = hashlib.sha256(script_bytes).hexdigest()
     if staged_digest != script_sha256:
         return RunnerResult(outcome="failure", failure_code="staged-hash-mismatch")
@@ -526,7 +529,10 @@ def run_staged(
     if executable_digest != profile.executable_sha256:
         return RunnerResult(outcome="failure", failure_code="runner-executable-mismatch")
 
-    tmp_dir = tempfile.mkdtemp(prefix="ops-guard-exec-")
+    # The staging dir is attributable to the owning gate process: a crash
+    # leftover is swept only after that owner is proven dead (ADR 0012).
+    prefix = f"ops-guard-exec-{owner_id}-" if owner_id else "ops-guard-exec-"
+    tmp_dir = tempfile.mkdtemp(prefix=prefix)
     job = None
     process = None
     try:

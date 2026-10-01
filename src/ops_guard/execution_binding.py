@@ -550,17 +550,24 @@ def run_staged(
             # instruction, let alone spawn a descendant, before it is
             # assigned to the Job Object (no arming race).
             popen_kwargs["creationflags"] = 0x00000004  # CREATE_SUSPENDED
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=profile.working_directory,
-            env=env,
-            shell=False,
-            start_new_session=True,  # POSIX: own process group for tree kill
-            **popen_kwargs,
-        )
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=profile.working_directory,
+                env=env,
+                shell=False,
+                start_new_session=True,  # POSIX: own process group for tree kill
+                **popen_kwargs,
+            )
+        except OSError:
+            # An unspawnable executable (vanished binary, invalid working
+            # directory, resource limits) is an uncertain completion with a
+            # known cause: explicitly unknown, audited spawn-failure (ADR
+            # 0005, ADR 0012).
+            return RunnerResult(outcome="unknown", failure_code="spawn-failure")
         if os.name == "nt":
             try:
                 job = _WindowsJob()
@@ -620,9 +627,12 @@ def run_staged(
                 job.terminate()
             return RunnerResult(outcome="unknown", failure_code="executor-timeout")
         except OSError:
+            # wait() itself failed after a successful spawn: an internal
+            # runner error, audited executor-error (not spawn-failure —
+            # the spawn succeeded). The completion is uncertain (ADR 0005).
             if job:
                 job.terminate()
-            return RunnerResult(outcome="unknown", failure_code="spawn-failure")
+            return RunnerResult(outcome="unknown", failure_code="executor-error")
         writer.join(timeout=5)
         for reader in readers:
             reader.join(timeout=5)

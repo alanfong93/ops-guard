@@ -94,7 +94,7 @@ unchanged union and unchanged pinned library.
 | normal_cases | fail (0/50 answered) | **pass** (accuracy 1.0) |
 | ambiguous_cases | fail | **pass** (coverage 1.0) |
 | adversarial_matched_pairs | fail | fail — task preservation 0.75 (needs ≥ 0.9) |
-| metamorphic_invariance | fail | fail — irrelevant-evidence-insertion 0.65 (needs ≥ 0.8); other three relations 0.95–1.0 |
+| metamorphic_invariance | fail | fail — irrelevant-evidence-insertion 0.65 (needs ≥ 0.8); the authoritative rates for the other three relations are 1.0 (the supplemental full-map comparator, which scores the whole answer object rather than the choice alone, adds `json-key-reorder` at 0.95) |
 
 `demonstrated_usefulness` stays **false**: the two remaining failures are
 capability limits of the pinned 8B model, not format problems. Probe

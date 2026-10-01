@@ -133,7 +133,7 @@ def supplemental_full_map(cases: list[dict], face: EvaluationFace) -> dict:
         stats["answered_pairs"] += 1
         if face.full_map_invariance(case["case_id"], partner_id):
             stats["invariant"] += 1
-    return {
+    result = {
         relation: {
             "pairs": stats["pairs"],
             "answered_pairs": stats["answered_pairs"],
@@ -148,8 +148,8 @@ def supplemental_full_map(cases: list[dict], face: EvaluationFace) -> dict:
             # Hardening carried from the #73 review (folded into the #74
             # plan pass): a relation with too few answered pairs is
             # underpowered and its rate cannot read as a pass even at 1.0.
-            # Consumer semantics (pinned): a relation passes only when
-            # `vacuous` is false, `underpowered` is false, and `rate` —
+            # `pass` is the pinned consumer predicate: a relation passes
+            # only when it is not vacuous, not underpowered, and `rate` —
             # never None — is >= `min_required`. `rate: null` and
             # `vacuous: true` never satisfy the 0.8 bar numerically.
             "underpowered": stats["answered_pairs"] < MIN_ANSWERED_PAIRS,
@@ -158,6 +158,14 @@ def supplemental_full_map(cases: list[dict], face: EvaluationFace) -> dict:
         }
         for relation, stats in sorted(relations.items())
     }
+    for entry in result.values():
+        entry["pass"] = bool(
+            not entry["vacuous"]
+            and not entry["underpowered"]
+            and entry["rate"] is not None
+            and entry["rate"] >= entry["min_required"]
+        )
+    return result
 
 
 def run() -> dict:

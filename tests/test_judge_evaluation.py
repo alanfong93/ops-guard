@@ -289,7 +289,47 @@ def test_runner_report_shape_and_non_claims(tmp_path, monkeypatch) -> None:
         assert stats["pairs"] == 0
         assert stats["rate"] is None and stats["vacuous"] is True
         assert stats["answered_pairs"] == 0 and stats["not_evaluable"] == 0
+        # the pinned consumer predicate: vacuous relations never pass
+        assert stats["underpowered"] is True
+        assert stats["pass"] is False
     assert report["demonstrated_usefulness"] is True or report["demonstrated_usefulness"] is False
+
+
+def test_underpowered_relation_cannot_read_as_passing() -> None:
+    """Four answered invariant pairs (rate 1.0) still cannot pass: the
+    underpowered flag is part of the pinned pass predicate (#73 review
+    hardening, locked per the #90 review)."""
+    _, cases = load_corpus()
+    relation_cases = [
+        c
+        for c in cases
+        if c.get("case_class") == "metamorphic"
+        and c.get("metamorphic_relation") == "json-key-reorder"
+    ][:4]  # exactly one pair
+
+    class _PairFace:
+        """Minimal face: one answered, invariant pair for the relation."""
+
+        def __init__(self, case_ids):
+            self.case_ids = set(case_ids)
+
+        def full_map_answered(self, a, b):
+            return {a, b} <= self.case_ids
+
+        def full_map_invariance(self, a, b):
+            return True
+
+        def drain_failure_counts(self):
+            return {}
+
+    face = _PairFace({relation_cases[0]["case_id"], relation_cases[0]["matched_case_id"]})
+    full_map = supplemental_full_map(relation_cases, face)
+    entry = full_map["json-key-reorder"]
+    assert entry["answered_pairs"] == 1
+    assert entry["rate"] == 1.0  # numerically at the bar...
+    assert entry["vacuous"] is False
+    assert entry["underpowered"] is True  # ...but underpowered
+    assert entry["pass"] is False  # and the predicate says so
 
 def test_no_three_way_tie_is_ever_an_allowed_answer() -> None:
     """The 1-1-1 tie is an AGGREGATION_TIE inability — never an allowed

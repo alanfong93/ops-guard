@@ -281,6 +281,13 @@ def test_projection_is_closed_and_versioned() -> None:
     assert set(projection) <= ALLOWED_PROJECTION_FIELDS
     assert projection["schema_version"] == "ops-guard-risk-projection-v1"
     assert projection["citation_refs"][0].endswith("@2026-09-29.1")
+    # the #74 corrective is versioned: a silent revert of the v2 bump
+    # (or of the decisive-format instructions) must fail here
+    assert projection["prompt_version"] == "ops-guard-risk-prompt-v2"
+    import ops_guard.judge as _jm
+
+    assert "bare JSON string" in _jm._RISK_INSTRUCTIONS
+    assert "never an object" in _jm._RISK_INSTRUCTIONS
 
 
 @given(junk=st.text(min_size=0, max_size=20))

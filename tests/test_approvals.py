@@ -28,6 +28,14 @@ from ops_guard import (
 )
 from helpers import fresh_service, make_invocation
 
+from helpers import binding_template
+from tests_helpers_runbook import VALID_RUNBOOK
+
+
+def _bound_issue(service, invocation, ttl=timedelta(minutes=10)):
+    template = binding_template(VALID_RUNBOOK, "/opt/scripts/restart-n8n.sh", "a" * 64, invocation)
+    return service.open_proposal(invocation, ttl=ttl, execution_binding=template)
+
 OPERATOR = "alan"
 
 
@@ -54,7 +62,7 @@ def verifier(service, clock) -> ApprovalVerifier:
 
 
 def _recorded(verifier, service, ttl=timedelta(minutes=10)):
-    issued = service.open_proposal(make_invocation(), ttl=ttl)
+    issued = _bound_issue(service, make_invocation(), ttl)
     record = verifier.record_approval(issued.token, operator_identity=OPERATOR)
     return issued, record
 
@@ -80,7 +88,7 @@ def test_recorded_approval_verifies_and_spends_atomically(service, verifier) -> 
 
 
 def test_host_supplied_approval_is_rejected(verifier, service) -> None:
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=5))
     with pytest.raises(HostSuppliedApprovalError):
         verifier.verify(issued.token, operator_identity=OPERATOR)
 
@@ -97,7 +105,7 @@ def test_unrecorded_tokens_never_verify(attempt: str) -> None:
 
 
 def test_wrong_operator_cannot_record_or_verify(service, verifier) -> None:
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=5))
     with pytest.raises(ApprovalOperatorMismatchError):
         verifier.record_approval(issued.token, operator_identity="not-alan")
     verifier.record_approval(issued.token, operator_identity=OPERATOR)
@@ -112,11 +120,11 @@ def test_one_approval_per_proposal(service, verifier) -> None:
 
 
 def test_expired_proposal_cannot_be_recorded_or_verified(service, verifier, clock) -> None:
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=5))
     clock.advance(6 * 60)
     with pytest.raises(TokenExpiredError):
         verifier.record_approval(issued.token, operator_identity=OPERATOR)
-    issued2 = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued2 = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=5))
     verifier.record_approval(issued2.token, operator_identity=OPERATOR)
     clock.advance(6 * 60)
     with pytest.raises(TokenExpiredError):
@@ -128,7 +136,7 @@ def test_expired_proposal_cannot_be_recorded_or_verified(service, verifier, cloc
 
 
 def test_consumed_or_unknown_tokens_cannot_be_approved(service, verifier) -> None:
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=5))
     service.consume(issued.token)
     with pytest.raises(TokenAlreadyConsumedError):
         verifier.record_approval(issued.token, operator_identity=OPERATOR)
@@ -199,7 +207,7 @@ def test_verify_rejects_consumed_proposal(service, verifier) -> None:
 
 
 def test_operator_gate_precedes_existence_oracle(service, verifier) -> None:
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=5))
     # Wrong operator + never-recorded token: the identity gate answers first.
     with pytest.raises(ApprovalOperatorMismatchError):
         verifier.verify(issued.token, operator_identity="mallory")
@@ -257,7 +265,7 @@ def test_verifier_rejects_naive_clock(service, tmp_path) -> None:
         operator_identity=OPERATOR,
         clock=lambda: datetime(2026, 9, 23, 12, 0, 0),
     )
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=5))
     with pytest.raises(ValueError):
         naive.record_approval(issued.token, operator_identity=OPERATOR)
 
@@ -350,7 +358,7 @@ def test_verify_eligibility_boundary_is_the_proposal_expiry(approach: int) -> No
         operator_identity=OPERATOR,
         clock=clock,
     )
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=10))
+    issued = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=10))
     verifier.record_approval(issued.token, operator_identity=OPERATOR)
     clock.advance(min(approach, 599))
     assert verifier.verify(issued.token, operator_identity=OPERATOR).allowed
@@ -485,7 +493,7 @@ def test_frozen_bytes_tamper_fails_closed_with_intact_columns(service, verifier)
     """Issue #20: a process-compromise tamper of the stored frozen bytes
     must fail closed even when every binding column is intact — the digest
     is re-derived from the bytes, not read back from the row."""
-    issued = service.open_proposal(make_invocation(), ttl=timedelta(minutes=5))
+    issued = _bound_issue(service, make_invocation(), ttl=timedelta(minutes=5))
     verifier.record_approval(issued.token, operator_identity=OPERATOR)
     digest = service.token_digest(issued.token)
 

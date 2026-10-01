@@ -220,6 +220,8 @@ def build_mcp_server(
     proposals: "ProposalService | None" = None,
     proposal_ttl: "timedelta | None" = None,
     judge: "LocalJudge | None" = None,
+    execution_catalog: "tuple[dict, dict] | None" = None,
+    gate: "ExecutionGate | None" = None,
 ) -> FastMCP:
     """MCP server exposing ``search_runbook`` — and, when a proposal service
     is wired (issue #57), ``propose_fix``.
@@ -247,8 +249,17 @@ def build_mcp_server(
                 "propose_fix call records an advisory result or typed failure"
             )
         register_propose_fix(
-            server, library=library, proposals=proposals, ttl=proposal_ttl, judge=judge
+            server,
+            library=library,
+            proposals=proposals,
+            ttl=proposal_ttl,
+            judge=judge,
+            execution_catalog=execution_catalog,
         )
+        if gate is not None:
+            from ops_guard.proposal_tool import register_execute_fix
+
+            register_execute_fix(server, library=library, gate=gate)
 
     @server.tool
     def search_runbook(

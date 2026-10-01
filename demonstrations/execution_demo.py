@@ -73,7 +73,16 @@ def run_demonstration() -> dict:
 
     import os as _os
 
-    from helpers import FakeClock, make_observer_registry, make_policy_document, load_test_policy  # tests package helper
+    from helpers import (
+        FakeClock,
+        make_observer_registry,
+        make_policy_document,
+        load_test_policy,
+        make_runner_profile,
+    )  # tests package helper
+    profile_digest = make_runner_profile().digest()
+    from helpers import binding_template  # tests package helper
+    from tests_helpers_runbook import VALID_RUNBOOK
 
     path = os.path.join(tempfile.mkdtemp(prefix="ops-guard-demo-"), "ops-guard.db")
     clock = FakeClock()
@@ -95,6 +104,7 @@ def run_demonstration() -> dict:
                 "arguments": {"service": "n8n", "timeout_seconds": 30},
                 "preconditions": [{"name": "healthcheck", "expected": "passing"}],
                 "runbook_revision_hash": revision_hash,
+                "runner_profile_digest": profile_digest,
             })],
         ),
         registry,
@@ -123,6 +133,7 @@ def run_demonstration() -> dict:
         "arguments": {"service": "n8n", "timeout_seconds": 30},
         "preconditions": [{"name": "healthcheck", "expected": "passing"}],
         "runbook_revision_hash": revision_hash,
+        "runner_profile_digest": profile_digest,
     })
 
     from ops_guard import Citation
@@ -160,7 +171,6 @@ def run_demonstration() -> dict:
     def request(token: str, **overrides) -> ExecutionRequest:
         fields = dict(
             token=token,
-            script_path=SCRIPT_PATH,
             citation=citation,
             expected_digest=None,
         )
@@ -185,6 +195,16 @@ def run_demonstration() -> dict:
             operator_identity=OPERATOR,
         )
 
+    def issue_proposal() -> object:
+        """Every demo proposal carries its execution binding (ADR 0012)."""
+        invocation = build_invocation(revision_hash)
+        template = binding_template(
+            VALID_RUNBOOK, SCRIPT_PATH, SCRIPT_SHA256, invocation
+        )
+        return service.open_proposal(
+            invocation, ttl=timedelta(minutes=10), execution_binding=template
+        )
+
     def scenario(name: str, request_obj: ExecutionRequest, worker=executor) -> None:
         before = len(harness_executor_calls)
         outcome = gate.execute(request_obj, worker)
@@ -192,17 +212,17 @@ def run_demonstration() -> dict:
 
     # 1. Standing-authorization success.
     use_standing()
-    issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
+    issued = issue_proposal()
     scenario("standing-authorization-success", request(issued.token, expected_digest=issued.invocation_digest))
 
     # 2. Independent approval success.
     use_approval_only()
-    issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
+    issued = issue_proposal()
     verifier.record_approval(issued.token, operator_identity=OPERATOR)
     scenario("independent-approval-success", request(issued.token))
 
     # 3. Missing-evidence refusal.
-    issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
+    issued = issue_proposal()
     # A well-formed citation whose revision the library never verified:
     # caller-supplied documents are no longer consulted at all (issue #34).
     missing_citation = Citation(
@@ -227,7 +247,7 @@ def run_demonstration() -> dict:
 
     # 5. Failed-precondition refusal: the operator's own observer reports
     # the wrong state — caller-supplied values are no longer accepted.
-    issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
+    issued = issue_proposal()
     registry._test_state["value"] = "failing"
     scenario("failed-precondition-refusal", request(issued.token))
     registry._test_state["value"] = "passing"
@@ -236,7 +256,7 @@ def run_demonstration() -> dict:
     scenario("invalid-token-refusal", request("never-issued"))
 
     # 7. Expired-token refusal.
-    issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
+    issued = issue_proposal()
     clock.advance(11 * 60)
     scenario("expired-token-refusal", request(issued.token))
     clock = FakeClock()  # restore the clock for later scenarios
@@ -251,7 +271,7 @@ def run_demonstration() -> dict:
     )
 
     # 8. Audit-write refusal (execution-start append fails; nothing runs).
-    issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
+    issued = issue_proposal()
     original_append_on = audit.append_on
 
     def failing_append_on(conn, event_type, **kwargs):
@@ -265,12 +285,12 @@ def run_demonstration() -> dict:
 
     # 9. Reused-token refusal (replay after a successful dispatch).
     use_standing()  # the standing-authorization path dispatches unattended
-    issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
+    issued = issue_proposal()
     scenario("reused-token-first-dispatch", request(issued.token))
     scenario("reused-token-refusal", request(issued.token))
 
     # 10. Post-dispatch unknown outcome.
-    issued = service.open_proposal(build_invocation(revision_hash), ttl=timedelta(minutes=10))
+    issued = issue_proposal()
     scenario("unknown-outcome", request(issued.token), worker=unknown_executor)
 
     audit_events = [

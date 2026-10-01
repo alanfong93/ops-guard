@@ -36,6 +36,29 @@ native Uvicorn TLS at the configured LAN endpoint ([ADR 0006](adr/0006-lan-mcp-t
   observer bindings, validated fail-closed at startup and identified by a
   canonical digest. No MCP tool or HTTP endpoint can read or edit it.
 
+### `execute_fix`
+
+Execute the operation frozen in a proposal. Contract:
+[ADR 0012](adr/0012-proposal-bound-execution-artifact.md). The request
+carries a one-time token and a verified citation — **no script path,
+bytes, script id, runner, standing-authorization record, operator identity,
+or observed-precondition values is accepted**.
+
+- **Input** — `token` (string, required), `citation` (object, required:
+  runbook_id, revision, content_hash, locator).
+- **Validation, before dispatch** — the citation re-resolves against the
+  verified library; the proposal's immutable execution binding is loaded
+  and re-verified (binding digest, catalog entry, runner profile, and
+  staged script bytes); preconditions are observed fresh; one
+  authorization path (standing or proposal-bound approval) is verified;
+  the token is consumed atomically with the execution-start record.
+- **Result** — `dispatched`, `proposal_id`, `authorization_path`,
+  `outcome` (`success`/`failure`/`unknown`), and `refusal` (typed reason
+  when not dispatched). Raw process output, script bytes, and secrets are
+  never returned or audited.
+- **Outcome semantics** — runner timeouts map to `unknown` (ADR 0005);
+  nothing retries automatically.
+
 ## Tools
 
 ### `search_runbook`

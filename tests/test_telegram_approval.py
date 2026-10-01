@@ -91,7 +91,22 @@ class Harness:
             preconditions=[{"name": "docker-engine", "expected": "running"}],
             runbook_revision_hash="b" * 64,
         )
-        return self.service.open_proposal(invocation, ttl=timedelta(minutes=15))
+        from ops_guard.execution_binding import ExecutionBindingTemplate
+
+        template = ExecutionBindingTemplate(
+            runbook_id="n8n-restart",
+            runbook_revision="2026-09-23.1",
+            runbook_content_hash="b" * 64,
+            script_id="fixture-script",
+            script_path="/opt/scripts/restart-n8n.sh",
+            script_sha256="c" * 64,
+            catalog_entry_digest="d" * 64,
+            runner_profile_id="test-runner",
+            runner_profile_digest="e" * 64,
+        )
+        return self.service.open_proposal(
+            invocation, ttl=timedelta(minutes=15), execution_binding=template
+        )
 
 
 @pytest.fixture()

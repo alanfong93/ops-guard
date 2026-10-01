@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from datetime import timedelta
 
 import pytest
@@ -31,7 +32,14 @@ from ops_guard import (
 from ops_guard.retrieval import RunbookLibrary
 from helpers import make_invocation
 from tests_helpers_runbook import VALID_RUNBOOK
-from helpers import make_observer_registry, make_policy_document, load_test_policy
+from helpers import (
+    make_observer_registry,
+    make_policy_document,
+    load_test_policy,
+    make_execution_catalog,
+    make_runner_profile,
+    binding_template,
+)
 
 OPERATOR = "alan"
 SCRIPT_PATH = "/opt/scripts/restart-n8n.sh"
@@ -40,6 +48,9 @@ SCRIPT_SHA256 = hashlib.sha256(SCRIPT_BYTES).hexdigest()
 
 
 def base_authorization() -> StandingAuthorization:
+    from helpers import make_runner_profile
+
+    profile_digest = make_runner_profile().digest()
     return parse_authorization({
         "authorization_id": "auth-restart-n8n",
         "script_path": SCRIPT_PATH,
@@ -49,6 +60,7 @@ def base_authorization() -> StandingAuthorization:
         "arguments": {"service": "n8n", "timeout_seconds": 30},
         "preconditions": [{"name": "healthcheck", "expected": "passing"}],
         "runbook_revision_hash": VALID_RUNBOOK["content_hash"],
+        "runner_profile_digest": profile_digest,
     })
 
 
@@ -64,7 +76,6 @@ def citation() -> Citation:
 def make_request(**overrides) -> ExecutionRequest:
     fields = dict(
         token="token-placeholder",
-        script_path=SCRIPT_PATH,
         citation=citation(),
         expected_digest=None,
     )
@@ -88,6 +99,9 @@ class Harness:
         self.library, _rejections = RunbookLibrary.load([VALID_RUNBOOK])
         self.scripts: dict[str, bytes] = {SCRIPT_PATH: SCRIPT_BYTES}
         self.registry = make_observer_registry({"static_test": "passing"})
+        self.catalog = make_execution_catalog(
+            VALID_RUNBOOK, SCRIPT_PATH, SCRIPT_SHA256
+        )
         self.rebuild_policy()
         self.gate = ExecutionGate(
             self.service,
@@ -99,13 +113,22 @@ class Harness:
             observer_registry=self.registry,
             authorization_catalog=self.policy,
             operator_identity=OPERATOR,
+            execution_catalog=self.catalog,
         )
         self.executor_calls: list[tuple[Invocation, bytes]] = []
 
     def issue(self, **overrides) -> object:
+        skip_binding = overrides.pop("_skip_binding", False)
         overrides.setdefault("runbook_revision_hash", VALID_RUNBOOK["content_hash"])
         invocation = make_invocation(**overrides)
-        issued = self.service.open_proposal(invocation, ttl=timedelta(minutes=10))
+        template = None
+        if not skip_binding:
+            template = binding_template(
+                VALID_RUNBOOK, SCRIPT_PATH, SCRIPT_SHA256, invocation
+            )
+        issued = self.service.open_proposal(
+            invocation, ttl=timedelta(minutes=10), execution_binding=template
+        )
         return issued
 
     def rebuild_policy(self, *, with_standing: bool = True, extra_standing=(), bindings: bool = True) -> None:
@@ -134,17 +157,7 @@ class Harness:
             observer_registry=self.registry,
             authorization_catalog=self.policy,
             operator_identity=OPERATOR,
-        )
-        self.gate = ExecutionGate(
-            self.service,
-            self.verifier,
-            self.audit,
-            runbooks=self.library,
-            script_source=self.scripts.__getitem__,
-            clock=self.clock,
-            observer_registry=self.registry,
-            authorization_catalog=self.policy,
-            operator_identity=OPERATOR,
+            execution_catalog=self.catalog,
         )
 
     def rebuild_library(self, documents: list[dict]) -> None:
@@ -160,6 +173,7 @@ class Harness:
             observer_registry=self.registry,
             authorization_catalog=self.policy,
             operator_identity=OPERATOR,
+            execution_catalog=self.catalog,
         )
 
     def executor(self, invocation: Invocation, script_bytes: bytes) -> str:
@@ -440,8 +454,9 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
             "arguments": {"service": "n8n", "timeout_seconds": 30},
             "preconditions": [{"name": "healthcheck", "expected": "passing"}],
             "runbook_revision_hash": "b" * 64,
+            "runner_profile_digest": "e" * 64,
         })
-        harness_issue = harness.issue(action="destroy")
+        harness_issue = harness.issue(action="destroy", _skip_binding=True)
         overrides["token"] = harness_issue.token
         harness.verifier.record_approval(harness_issue.token, operator_identity=OPERATOR)
     elif mutation == "missing-observation":
@@ -524,7 +539,7 @@ def test_every_unavailable_input_prevents_dispatch(mutation: str, harness: Harne
         )
     elif mutation == "script-unresolvable":
         harness.rebuild_policy(with_standing=False)
-        overrides["script_path"] = "/opt/scripts/never-there.sh"
+        pass  # the binding names the path; the source will fail to resolve it
     elif mutation == "forged-script-bytes":
         # The catalog authorization binds the real bytes; the authoritative
         # source serves different ones. The gate must match against the bytes
@@ -566,6 +581,7 @@ def test_standing_mismatch_falls_back_to_approval(harness: Harness) -> None:
     provenance is what gets recorded (issue #34)."""
     issued = harness.issue()
     harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    profile_digest = make_runner_profile().digest()
     mismatched = parse_authorization({
         "authorization_id": "other-rule",
         "script_path": SCRIPT_PATH,
@@ -575,6 +591,7 @@ def test_standing_mismatch_falls_back_to_approval(harness: Harness) -> None:
         "arguments": {"service": "n8n", "timeout_seconds": 30},
         "preconditions": [{"name": "healthcheck", "expected": "passing"}],
         "runbook_revision_hash": VALID_RUNBOOK["content_hash"],
+        "runner_profile_digest": profile_digest,
     })
     harness.rebuild_policy(with_standing=False, extra_standing=[mismatched])
     outcome = harness.gate.execute(
@@ -717,7 +734,7 @@ def test_citation_never_resolves_without_a_verified_library_revision(
 
 @given(
     corrupt=st.sampled_from(
-        ["none", "script-bytes", "script-path", "revision-hash", "observation"]
+        ["none", "script-bytes", "revision-hash", "observation"]
     ),
 )
 @settings(max_examples=25, deadline=None)
@@ -747,6 +764,17 @@ def test_only_exact_resolved_artifacts_dispatch(corrupt: str) -> None:
         ),
         registry,
     )
+    registry = make_observer_registry({"static_test": "passing"})
+    policy = load_test_policy(
+        make_policy_document(
+            runbook_id=VALID_RUNBOOK["runbook_id"],
+            revision=VALID_RUNBOOK["revision"],
+            content_hash=VALID_RUNBOOK["content_hash"],
+            standing=[base_authorization()],
+        ),
+        registry,
+    )
+    catalog = make_execution_catalog(VALID_RUNBOOK, SCRIPT_PATH, SCRIPT_SHA256)
     gate = ExecutionGate(
         service,
         verifier,
@@ -757,13 +785,14 @@ def test_only_exact_resolved_artifacts_dispatch(corrupt: str) -> None:
         observer_registry=registry,
         authorization_catalog=policy,
         operator_identity=OPERATOR,
+        execution_catalog=catalog,
     )
 
     overrides: dict = {}
     if corrupt == "script-bytes":
         scripts[SCRIPT_PATH] = SCRIPT_BYTES + b"# malicious appendage\n"
     elif corrupt == "script-path":
-        overrides["script_path"] = "/opt/scripts/never-there.sh"
+        pass  # the binding names the path; the source will fail to resolve it
     elif corrupt == "revision-hash":
         overrides["citation"] = Citation(
             runbook_id=VALID_RUNBOOK["runbook_id"],
@@ -776,7 +805,10 @@ def test_only_exact_resolved_artifacts_dispatch(corrupt: str) -> None:
         registry._test_state["value"] = "failing"
 
     invocation = make_invocation(runbook_revision_hash=VALID_RUNBOOK["content_hash"])
-    issued = service.open_proposal(invocation, ttl=timedelta(minutes=10))
+    template = binding_template(VALID_RUNBOOK, SCRIPT_PATH, SCRIPT_SHA256, invocation)
+    issued = service.open_proposal(
+        invocation, ttl=timedelta(minutes=10), execution_binding=template
+    )
     overrides["token"] = issued.token
     # every corrupt case records the proposal-bound approval: script-bytes
     # falls back to it after the standing match refuses the resolved digest
@@ -794,12 +826,13 @@ def test_only_exact_resolved_artifacts_dispatch(corrupt: str) -> None:
         assert outcome.dispatched
         assert calls == [SCRIPT_BYTES]
     elif corrupt == "script-bytes":
-        # The catalog's standing match refuses on the resolved digest, and
-        # the proposal-bound path dispatches only the gate-resolved bytes —
-        # never a caller's substitute.
-        assert outcome.dispatched
-        assert calls == [scripts[SCRIPT_PATH]]
-        assert calls != [SCRIPT_BYTES]
+        # The binding pins the script digest: tampered source bytes refuse
+        # BEFORE authorization or consumption (ADR 0012), even with an
+        # approval recorded.
+        assert not outcome.dispatched
+        assert "bound script digest" in (outcome.refusal or "")
+        assert calls == []
+        assert not _consumed(service, issued)
     else:
         assert not outcome.dispatched and outcome.refusal
         assert calls == []
@@ -829,3 +862,166 @@ def test_script_source_returning_non_bytes_refuses_fail_closed(
     assert not frozen.consumed
     refusals = [e for e in harness.audit.events() if e.event_type == "refusal"]
     assert refusals and "script_source must resolve a path to bytes" in refusals[-1].payload["reason"]
+
+
+# ---- output bounds and process-tree kill (issue #64 review) --------------
+
+
+def test_output_overflow_kills_and_returns_failure(tmp_path) -> None:
+    """A chatty child that exceeds output_limit is killed and the outcome is
+    failure/output-limit — the parent never buffers the full stream."""
+    import hashlib as hl
+    import time as tm
+    from dataclasses import replace
+
+    from ops_guard.execution_binding import RunnerProfile, run_staged
+
+    profile = replace(
+        RunnerProfile(
+            profile_id="chatty",
+            executable=sys.executable,
+            executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+            argv=(sys.executable,),
+            working_directory=str(tmp_path),
+            env_allowlist=("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC"),
+            timeout_seconds=15,
+            output_limit=1024,
+        ),
+    )
+    fixture = (
+        "import sys, time\n"
+        "for _ in range(60):\n"
+        "    sys.stdout.write('x' * 65536)\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(0.05)\n"
+    ).encode()
+    started = tm.monotonic()
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=fixture,
+        script_sha256=hl.sha256(fixture).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    elapsed = tm.monotonic() - started
+    assert result.outcome == "failure"
+    assert result.failure_code == "output-limit"
+    assert elapsed < 15  # killed well before the script would finish
+
+
+def test_grandchild_killed_on_timeout(tmp_path) -> None:
+    """A grandchild spawned by the timed-out child does not survive the
+    timeout on POSIX (process-group kill)."""
+    import hashlib as hl
+    import time as tm
+    from dataclasses import replace
+
+    from ops_guard.execution_binding import RunnerProfile, run_staged
+
+    marker = tmp_path / "grandchild-alive"
+    marker.write_text("pending")  # removed by the grandchild when it exits
+    profile = replace(
+        RunnerProfile(
+            profile_id="spawner",
+            executable=sys.executable,
+            executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+            argv=(sys.executable,),
+            working_directory=str(tmp_path),
+            env_allowlist=("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC"),
+            timeout_seconds=1,
+        ),
+    )
+    spawn_line = f"subprocess.Popen([{sys.executable!r}, '-c', 'import time; time.sleep(30)'])"
+    body = (
+        "import subprocess, time\n"
+        f"{spawn_line}\n"
+        "time.sleep(30)\n"
+    ).encode()
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    assert result.outcome == "unknown"
+    if hasattr(os, "killpg"):  # POSIX tree-kill guarantee
+        deadline = tm.monotonic() + 5
+        while tm.monotonic() < deadline and marker.exists():
+            tm.sleep(0.1)
+        assert not marker.exists(), "grandchild survived the tree kill"
+
+# ---- binding refusal codes (issue #64; ADR 0012) ------------------------
+
+
+def _binding_gate(harness: Harness, *, corrupt: str) -> tuple[Harness, object]:
+    """A gate wired for binding-corruption cases; returns the mutated harness
+    and a request against its current proposal."""
+    issued = harness.issue()
+    harness.verifier.record_approval(issued.token, operator_identity=OPERATOR)
+    with harness.service.store.read() as conn:
+        stored = harness.service.fetch_binding_on(conn, issued.proposal_id)
+    document = dict(stored["document"])
+    digest = stored["digest"]
+    if corrupt == "script":
+        harness.scripts[SCRIPT_PATH] = SCRIPT_BYTES + b"# tampered\n"
+    elif corrupt == "catalog":
+        entries, profiles = make_execution_catalog(
+            VALID_RUNBOOK, "/opt/scripts/other.sh", "d" * 64
+        )
+        harness.catalog = (entries, profiles)
+        harness.rebuild_policy()  # rebuilds the gate with harness.catalog
+    elif corrupt == "profile":
+        from helpers import make_runner_profile
+
+        entries, profiles = make_execution_catalog(
+            VALID_RUNBOOK, SCRIPT_PATH, SCRIPT_SHA256
+        )
+        from dataclasses import replace
+
+        changed_profile = replace(
+            make_runner_profile(), timeout_seconds=99
+        )
+        harness.catalog = (
+            entries,
+            {changed_profile.profile_id: changed_profile},
+        )
+        harness.rebuild_policy()  # rebuilds the gate with harness.catalog
+    elif corrupt == "stored":
+        import sqlite3 as _sq
+
+        with _sq.connect(harness.service.store.path) as conn:
+            document["script_sha256"] = "9" * 64
+            conn.execute(
+                "UPDATE execution_bindings SET document = ?, binding_digest = ? "
+                "WHERE proposal_id = ?",
+                (
+                    json.dumps(document, sort_keys=True),
+                    "0" * 64,
+                    issued.proposal_id,
+                ),
+            )
+    request = make_request(token=issued.token)
+    return harness, issued, document, digest
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "code"),
+    [
+        ("script", "binding-script-mismatch"),
+        ("catalog", "binding-catalog-changed"),
+        ("profile", "binding-profile-changed"),
+        ("stored", "binding-corrupt"),
+    ],
+)
+def test_binding_change_refusal_codes(harness: Harness, corrupt: str, code: str) -> None:
+    harness, issued, document, digest = _binding_gate(harness, corrupt=corrupt)
+    outcome = harness.gate.execute(
+        make_request(token=issued.token), harness.executor
+    )
+    assert not outcome.dispatched
+    refusals = [e for e in harness.audit.events() if e.event_type == "refusal"]
+    assert refusals[-1].payload["failure_code"] == code
+    frozen = harness.service.resolve(issued.token)
+    assert not frozen.consumed
+

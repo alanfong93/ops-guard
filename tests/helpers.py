@@ -102,6 +102,7 @@ def make_policy_document(
                 "arguments": dict(record.arguments),
                 "preconditions": [dict(p) for p in record.preconditions],
                 "runbook_revision_hash": record.runbook_revision_hash,
+                "runner_profile_digest": record.runner_profile_digest,
             }
             for record in standing
         ],
@@ -126,3 +127,56 @@ def load_test_policy(document, registry):
     from ops_guard.preconditions import load_policy
 
     return load_policy(document, registry)
+
+def make_runner_profile():
+    """The test runner profile (ADR 0012): deterministic digest."""
+    from ops_guard.execution_binding import RunnerProfile
+
+    return RunnerProfile(
+        profile_id="test-runner",
+        executable="C:/python3",
+        executable_sha256="e" * 64,
+        argv=("C:/python3", "-c", "pass"),
+        working_directory=".",
+        env_allowlist=("PATH",),
+        timeout_seconds=10,
+    )
+
+
+def make_execution_catalog(runbook, script_path, script_sha256, profile=None, action="restart", target="n8n"):
+    """A catalog binding the runbook's operation to the script."""
+    from ops_guard.execution_binding import CatalogEntry
+
+    profile = profile or make_runner_profile()
+    entry = CatalogEntry(
+        runbook_id=runbook["runbook_id"],
+        revision=runbook["revision"],
+        content_hash=runbook["content_hash"],
+        action=action,
+        target=target,
+        script_id="fixture-script",
+        script_path=script_path,
+        script_sha256=script_sha256,
+    )
+    entries = {entry.key(): entry}
+    return entries, {profile.profile_id: profile}
+
+
+def binding_template(runbook, script_path, script_sha256, invocation, entries=None, profiles=None):
+    """The resolved binding template for the invocation's action/target."""
+    from ops_guard.execution_binding import resolve_binding
+
+    if entries is None or profiles is None:
+        entries, profiles = make_execution_catalog(
+            runbook, script_path, script_sha256,
+            action=invocation.action, target=invocation.target,
+        )
+    return resolve_binding(
+        entries,
+        profiles,
+        runbook_id=runbook["runbook_id"],
+        revision=runbook["revision"],
+        content_hash=runbook["content_hash"],
+        action=invocation.action,
+        target=invocation.target,
+    )

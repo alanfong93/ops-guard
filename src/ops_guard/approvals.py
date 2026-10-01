@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ops_guard.errors import (
+    ProposalError,
     ApprovalAlreadyRecordedError,
     ApprovalError,
     ApprovalOperatorMismatchError,
@@ -39,9 +40,15 @@ CREATE TABLE IF NOT EXISTS approvals (
     expires_at             TEXT NOT NULL,
     created_at             TEXT NOT NULL,
     state                  TEXT NOT NULL CHECK (state IN ('recorded', 'used')),
-    used_at                TEXT
+    used_at                TEXT,
+    execution_binding_digest TEXT
 );
 """
+
+
+_MIGRATIONS = (
+    "ALTER TABLE approvals ADD COLUMN execution_binding_digest TEXT",
+)
 
 
 def _connect(path: str) -> sqlite3.Connection:
@@ -69,6 +76,7 @@ class ApprovalRecord:
     expires_at: datetime
     created_at: datetime
     used: bool
+    execution_binding_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,7 +102,13 @@ class ApprovalStore:
         self._path = database_path(path)
         conn = self._local_conn()
         try:
+            for statement in _MIGRATIONS:
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass  # column already exists on a pre-0012 database
             conn.executescript(_APPROVAL_SCHEMA)
+            conn.commit()
         finally:
             conn.close()
 
@@ -118,14 +132,15 @@ class ApprovalStore:
         runbook_revision_hash: str,
         expires_at: str,
         created_at: str,
+        execution_binding_digest: str | None = None,
     ) -> None:
         conn.execute(
             """
             INSERT INTO approvals (
                 approval_id, token_digest, proposal_id, operator_identity,
                 invocation_digest, runbook_revision_hash, expires_at,
-                created_at, state, used_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', NULL)
+                created_at, state, used_at, execution_binding_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recorded', NULL, ?)
             """,
             (
                 approval_id,
@@ -136,6 +151,7 @@ class ApprovalStore:
                 runbook_revision_hash,
                 expires_at,
                 created_at,
+                execution_binding_digest,
             ),
         )
 
@@ -214,6 +230,7 @@ class ApprovalVerifier:
             # dead proposal.
             now = self._now()
             frozen = self._proposals.resolve_on(conn, token)
+            binding = self._proposals.fetch_binding_on(conn, frozen.proposal_id)
             record = ApprovalRecord(
                 approval_id=uuid.uuid4().hex,
                 token_digest=token_digest,
@@ -224,6 +241,7 @@ class ApprovalVerifier:
                 expires_at=frozen.expires_at,
                 created_at=now,
                 used=False,
+                execution_binding_digest=binding["digest"] if binding else None,
             )
             try:
                 ApprovalStore.insert_on(
@@ -236,6 +254,7 @@ class ApprovalVerifier:
                     runbook_revision_hash=record.runbook_revision_hash,
                     expires_at=format_timestamp(record.expires_at),
                     created_at=format_timestamp(record.created_at),
+                    execution_binding_digest=record.execution_binding_digest,
                 )
             except sqlite3.IntegrityError as error:
                 raise ApprovalAlreadyRecordedError(
@@ -263,6 +282,11 @@ class ApprovalVerifier:
         with self._proposals.store.transaction() as conn:
             now = self._now()
             frozen = self._proposals.fetch_by_id_on(conn, proposal_id)
+            binding = self._proposals.fetch_binding_on(conn, proposal_id)
+            if binding is None:
+                raise ProposalError(
+                    "this proposal predates execution binding and cannot be approved"
+                )
             record = ApprovalRecord(
                 approval_id=uuid.uuid4().hex,
                 token_digest=frozen.token_digest,
@@ -273,6 +297,7 @@ class ApprovalVerifier:
                 expires_at=frozen.expires_at,
                 created_at=now,
                 used=False,
+                execution_binding_digest=binding["digest"],
             )
             try:
                 ApprovalStore.insert_on(
@@ -285,6 +310,7 @@ class ApprovalVerifier:
                     runbook_revision_hash=record.runbook_revision_hash,
                     expires_at=format_timestamp(record.expires_at),
                     created_at=format_timestamp(record.created_at),
+                    execution_binding_digest=record.execution_binding_digest,
                 )
             except sqlite3.IntegrityError as error:
                 raise ApprovalAlreadyRecordedError(
@@ -326,6 +352,13 @@ class ApprovalVerifier:
         ):
             raise InvocationMismatchError(
                 "recorded approval diverges from the live frozen proposal"
+            )
+        with self._proposals.store.read() as conn:
+            binding = self._proposals.fetch_binding_on(conn, frozen.proposal_id)
+        recorded_digest = row["execution_binding_digest"]
+        if binding is None or recorded_digest is None or binding["digest"] != recorded_digest:
+            raise InvocationMismatchError(
+                "the recorded approval is bound to a different execution binding"
             )
         return ApprovalDecision(
             allowed=True,

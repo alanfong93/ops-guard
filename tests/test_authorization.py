@@ -32,6 +32,7 @@ def authorization_document(**overrides):
         "arguments": {"service": "n8n", "timeout_seconds": 30},
         "preconditions": [{"name": "healthcheck", "expected": "passing"}],
         "runbook_revision_hash": "b" * 64,
+        "runner_profile_digest": "c" * 64,
     }
     document.update(overrides)
     return document
@@ -271,3 +272,31 @@ def test_partial_arguments_never_match_a_complete_rule() -> None:
     )
     result = match(authorization, invocation, SCRIPT)
     assert not result.matched
+
+def test_missing_runner_profile_digest_is_malformed() -> None:
+    """ADR 0012: standing authorization binds the current runner profile."""
+    document = authorization_document()
+    del document["runner_profile_digest"]
+    with pytest.raises(MalformedAuthorizationError, match="runner_profile_digest"):
+        parse_authorization(document)
+
+
+def test_profile_digest_mismatch_never_matches() -> None:
+    from ops_guard import ScriptIdentity
+
+    authorization = parse_authorization(authorization_document())
+    invocation = make_invocation(
+        action="restart",
+        target="n8n",
+        runbook_revision_hash="b" * 64,
+    )
+    script = ScriptIdentity(path="/opt/scripts/restart-n8n.sh", sha256="a" * 64)
+    result = match(
+        authorization, invocation, script, runner_profile_digest="d" * 64
+    )
+    assert not result.matched
+    assert "runner_profile_digest" in result.reason
+    same = match(
+        authorization, invocation, script, runner_profile_digest="c" * 64
+    )
+    assert same.matched

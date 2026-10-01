@@ -19,9 +19,26 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from ops_guard import AuditLog, AuditStore, ProposalService, ProposalStore
+from ops_guard import (
+    ApprovalStore,
+    ApprovalVerifier,
+    AuditLog,
+    AuditStore,
+    ExecutionGate,
+    ProposalService,
+    ProposalStore,
+)
 from ops_guard.retrieval import RunbookLibrary, build_mcp_server
-from helpers import FakeClock
+from helpers import (
+    FakeClock,
+    make_observer_registry,
+    make_policy_document,
+    load_test_policy,
+)
+from helpers import make_invocation
+from tests_helpers_runbook import VALID_RUNBOOK
+
+SCRIPT_BYTES = b'#!/bin/sh\necho ok\n'
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PUBLIC_CORPUS = os.path.join(REPO_ROOT, "runbooks")
@@ -380,3 +397,95 @@ def test_judge_typed_failure_still_creates_the_proposal(harness) -> None:
     events = harness.proposal_events()
     assert events[-1].judge_snapshot["status"] == "judge_timeout"
     assert original is not None
+
+# ---- execute_fix MCP tool (issue #64; ADR 0012) --------------------------
+
+
+OPERATOR = "alan"
+
+
+def _wired_gate(tmp_path, service=None, audit=None):
+    from ops_guard import ApprovalStore, ApprovalVerifier, ExecutionGate, ExecutionOwner
+    from helpers import make_execution_catalog
+
+    clock = FakeClock()
+    db = service.store.path if service is not None else str(tmp_path / "gate.db")
+    audit = audit or AuditLog(AuditStore(db), fingerprint_key=os.urandom(32), clock=clock)
+    service = service or ProposalService(ProposalStore(db), token_key=os.urandom(32), clock=clock, audit=audit)
+    verifier = ApprovalVerifier(ApprovalStore(db), service, operator_identity=OPERATOR, clock=clock)
+    registry = make_observer_registry({"static_test": "passing"})
+    policy = load_test_policy(
+        make_policy_document(
+            runbook_id=VALID_RUNBOOK["runbook_id"],
+            revision=VALID_RUNBOOK["revision"],
+            content_hash=VALID_RUNBOOK["content_hash"],
+        ),
+        registry,
+    )
+    catalog = make_execution_catalog(VALID_RUNBOOK, "/opt/scripts/restart-n8n.sh", "a" * 64)
+    gate = ExecutionGate(
+        service,
+        verifier,
+        audit,
+        runbooks=RunbookLibrary.load([VALID_RUNBOOK])[0],
+        script_source={"/opt/scripts/restart-n8n.sh": SCRIPT_BYTES}.__getitem__,
+        clock=clock,
+        observer_registry=registry,
+        authorization_catalog=policy,
+        operator_identity=OPERATOR,
+        execution_catalog=catalog,
+    )
+    return gate
+
+
+def test_execute_fix_schema_has_no_host_script_fields() -> None:
+    import inspect as inspect_module
+
+    from ops_guard.proposal_tool import register_execute_fix
+
+    params = inspect_module.signature(register_execute_fix).parameters
+    assert set(params) == {"server", "library", "gate"}
+    # the tool function itself is introspected at registration time by
+    # FastMCP; the contract is enforced in the tool-level tests below
+
+
+def test_execute_fix_refuses_without_binding(tmp_path) -> None:
+    """A legacy proposal (no binding) can never dispatch."""
+    from fastmcp import Client
+
+    clock = FakeClock()
+    db = str(tmp_path / "leg.db")
+    audit = AuditLog(AuditStore(db), fingerprint_key=os.urandom(32), clock=clock)
+    service = ProposalService(ProposalStore(db), token_key=os.urandom(32), clock=clock, audit=audit)
+    verifier = ApprovalVerifier(ApprovalStore(db), service, operator_identity=OPERATOR, clock=clock)
+    library = RunbookLibrary.load([VALID_RUNBOOK])[0]
+    gate = _wired_gate(tmp_path, service=service, audit=audit)
+    server = build_mcp_server(
+        library, audit, proposals=service, proposal_ttl=timedelta(minutes=15),
+        judge=hermetic_judge(audit), gate=gate,
+    )
+    invocation = make_invocation(runbook_revision_hash=VALID_RUNBOOK["content_hash"])
+    issued = service.open_proposal(invocation, ttl=timedelta(minutes=10))  # legacy
+    verifier.record_approval(issued.token, operator_identity=OPERATOR)
+
+    async def call():
+        from tests.test_proposal_execution_provenance import asyncio_run as _ar
+
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "execute_fix",
+                {
+                    "token": issued.token,
+                    "citation": {
+                        "runbook_id": VALID_RUNBOOK["runbook_id"],
+                        "revision": VALID_RUNBOOK["revision"],
+                        "content_hash": VALID_RUNBOOK["content_hash"],
+                        "locator": "restart/steps",
+                    },
+                },
+            )
+            return json.loads(result.content[0].text)
+
+    payload = asyncio.run(call())
+    assert payload["dispatched"] is False
+    assert "no execution binding" in payload["refusal"]

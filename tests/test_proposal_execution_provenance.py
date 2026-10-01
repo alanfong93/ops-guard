@@ -63,7 +63,34 @@ class Wiring:
         )
         with self.service.store.transaction() as conn:
             conn.execute("SELECT 1").fetchone()
+        self.scripts = {"/opt/scripts/restart-n8n.sh": b"#!/bin/sh\necho ok\n"}
         self.library = corpus_library()
+        from helpers import make_execution_catalog, make_runner_profile
+        from ops_guard.execution_binding import RunnerProfile, CatalogEntry
+        import hashlib as _hl
+
+        cited = cited_revision()
+        self.catalog_profile = RunnerProfile(
+            profile_id="test-runner",
+            executable="python3",
+            executable_sha256="e" * 64,
+            argv=("python3", "-c", "pass"),
+            working_directory=".",
+            env_allowlist=("PATH",),
+            timeout_seconds=10,
+        )
+        entry = CatalogEntry(
+            runbook_id=cited["runbook_id"],
+            revision=cited["revision"],
+            content_hash=cited["content_hash"],
+            action=cited["operation"]["action"],
+            target=cited["operation"]["target"],
+            script_id="fixture-script",
+            script_path="/opt/scripts/restart-n8n.sh",
+            script_sha256=_hl.sha256(self.scripts["/opt/scripts/restart-n8n.sh"]).hexdigest(),
+        )
+        self.catalog = ({entry.key(): entry}, {self.catalog_profile.profile_id: self.catalog_profile})
+        self.bound_script_sha256 = entry.script_sha256
         from test_proposal_tool import hermetic_judge
 
         self.server = build_mcp_server(
@@ -72,6 +99,7 @@ class Wiring:
             proposals=self.service,
             proposal_ttl=timedelta(minutes=15),
             judge=hermetic_judge(self.audit),
+            execution_catalog=self.catalog,
         )
         self.verifier = ApprovalVerifier(
             ApprovalStore(self.db_path), self.service, operator_identity="alan", clock=self.clock
@@ -99,9 +127,10 @@ class Wiring:
             observer_registry=registry,
             authorization_catalog=policy,
             operator_identity="alan",
+            execution_catalog=self.catalog,
         )
 
-    def propose(self, locator: str) -> dict:
+    def propose(self, locator: str, *, binding: bool = True) -> dict:
         from fastmcp import Client
 
         revision = cited_revision()
@@ -148,7 +177,6 @@ def test_locator_a_at_proposal_time_and_locator_b_at_execution_are_both_audited(
     wiring.verifier.record_approval(issued["token"], operator_identity="alan")
     request = ExecutionRequest(
         token=issued["token"],
-        script_path="/opt/scripts/restart-n8n.sh",
         citation=Citation(
             runbook_id=cited_revision()["runbook_id"],
             revision=cited_revision()["revision"],
@@ -170,7 +198,6 @@ def test_matching_proposal_evidence_refs_alone_cannot_authorize_execution(wiring
     issued = wiring.propose("update/ordering")
     request = ExecutionRequest(
         token=issued["token"],
-        script_path="/opt/scripts/restart-n8n.sh",
         citation=Citation(
             runbook_id=cited_revision()["runbook_id"],
             revision=cited_revision()["revision"],
@@ -189,7 +216,6 @@ def test_invalid_execution_evidence_still_refuses(wiring) -> None:
     wiring.verifier.record_approval(issued["token"], operator_identity="alan")
     request = ExecutionRequest(
         token=issued["token"],
-        script_path="/opt/scripts/restart-n8n.sh",
         citation=Citation(
             runbook_id=cited_revision()["runbook_id"],
             revision=cited_revision()["revision"],

@@ -55,6 +55,7 @@ from ops_guard.runbooks import (
     UnknownPassageError,
 )
 from ops_guard.proposals import format_timestamp
+from ops_guard.execution_binding import canonical_binding_digest
 from ops_guard.preconditions import (
         ObserverError,
         ObserverRegistry,
@@ -69,12 +70,12 @@ _OUTCOMES = {"success", "unknown"}
 
 @dataclass(frozen=True)
 class ExecutionRequest:
-    """What the MCP/server composition may tell the gate: which token,
-    which script path, which citation. Observations and authorization are
-    the server's own — callers can never supply them (issue #62; ADR 0011)."""
+    """What the MCP/server composition may tell the gate: which token and
+    which citation — nothing else. The script identity comes from the
+    proposal's immutable ExecutionBinding, observations and authorization
+    from the server (issues #62 and #64; ADR 0011/0012)."""
 
     token: str
-    script_path: str
     citation: Citation
     expected_digest: str | None = None
 
@@ -101,6 +102,7 @@ class ExecutionGate:
         observer_registry: "ObserverRegistry",
         authorization_catalog: "OperatorPolicy",
         operator_identity: str,
+        execution_catalog: "tuple[dict, dict] | None" = None,
         owner: ExecutionOwner | None = None,
     ) -> None:
         # One durable transaction boundary (issue #36): the execution-start
@@ -128,6 +130,8 @@ class ExecutionGate:
             )
         if not isinstance(operator_identity, str) or not operator_identity:
             raise GateConfigurationError("operator_identity must be the configured operator identity")
+        self._catalog = execution_catalog  # (entries, profiles) from ADR 0012
+        self._runner_profiles = execution_catalog[1] if execution_catalog else None
         self._observers = observer_registry
         self._policy = authorization_catalog
         self._operator_identity = operator_identity
@@ -148,7 +152,7 @@ class ExecutionGate:
     def execute(
         self,
         request: ExecutionRequest,
-        executor: Callable[[Invocation, bytes], str],
+        executor: Callable[[Invocation, bytes], str] | None = None,
     ) -> GateOutcome:
         """Run every gate; dispatch only after the durable transaction commits.
 
@@ -212,24 +216,6 @@ class ExecutionGate:
         except (MalformedRunbookError, UnknownPassageError) as error:
             return refuse(f"evidence rejected: {error}")
 
-        # 2. Script resolution: the exact bytes come from the authoritative
-        #    configured source and their SHA-256 is the only script digest
-        #    this gate reasons about (issue #34; ADR 0004) — the caller
-        #    names the path, never the hash. The source is the operator's
-        #    trust boundary: whatever it returns for a path IS the artifact
-        #    that path names. Resolution failure — including a non-bytes
-        #    return — is a refusal, before any consumption or side effect.
-        try:
-            script_bytes = self._script_source(request.script_path)
-            if not isinstance(script_bytes, bytes):
-                raise TypeError("script_source must resolve a path to bytes")
-            resolved_script = ScriptIdentity(
-                path=request.script_path,
-                sha256=hashlib.sha256(script_bytes).hexdigest(),
-            )
-        except (OSError, LookupError, ValueError, TypeError) as error:
-            return refuse(f"script could not be resolved: {error}")
-
         # 3. Token validity and frozen-invocation revalidation.
         try:
             frozen = self._proposals.resolve(request.token, expected_digest=request.expected_digest)
@@ -242,6 +228,105 @@ class ExecutionGate:
         except ProposalError as error:
             return refuse(f"token rejected: {error}")
         proposal_id = frozen.proposal_id
+
+        # 3b. The immutable execution binding (issue #64; ADR 0012) names
+        #     the script this proposal may ever run. Legacy proposals
+        #     without a binding can never dispatch through this gate.
+        with self._proposals.store.read() as conn:
+            binding_document = self._proposals.fetch_binding_on(conn, proposal_id)
+        if binding_document is None:
+            return refuse(
+                "proposal carries no execution binding",
+                digest=frozen.invocation_digest,
+                failure_code="binding-missing",
+            )
+        execution_binding = binding_document["document"]
+        if binding_document["digest"] != canonical_binding_digest(execution_binding):
+            return refuse(
+                "the stored execution binding is corrupt",
+                digest=frozen.invocation_digest,
+                failure_code="binding-corrupt",
+            )
+        if execution_binding["invocation_digest"] != frozen.invocation_digest:
+            return refuse(
+                "the execution binding diverges from the frozen invocation",
+                digest=frozen.invocation_digest,
+                failure_code="binding-mismatch",
+            )
+
+        # 4. Script resolution: the path comes from the binding, never from
+        #    the caller; the resolved bytes must hash exactly to the bound
+        #    script_sha256 (issue #34; ADR 0012).
+        script_path = execution_binding["script_path"]
+        try:
+            script_bytes = self._script_source(script_path)
+            if not isinstance(script_bytes, bytes):
+                raise TypeError("script_source must resolve a path to bytes")
+            resolved_sha256 = hashlib.sha256(script_bytes).hexdigest()
+        except (OSError, LookupError, ValueError, TypeError) as error:
+            return refuse(
+                f"script could not be resolved: {error}",
+                digest=frozen.invocation_digest,
+                failure_code="binding-script-unresolved",
+            )
+        resolved_script = ScriptIdentity(path=script_path, sha256=resolved_sha256)
+        if resolved_script.sha256 != execution_binding["script_sha256"]:
+            return refuse(
+                "the resolved script bytes do not match the bound script digest",
+                digest=frozen.invocation_digest,
+                failure_code="binding-script-mismatch",
+            )
+        if self._catalog is not None:
+            catalog_entries, catalog_profiles = self._catalog
+            entry = catalog_entries.get(
+                (
+                    execution_binding["runbook_id"],
+                    execution_binding["runbook_revision"],
+                    execution_binding["runbook_content_hash"],
+                    frozen.invocation.action,
+                    frozen.invocation.target,
+                )
+            )
+            entry_document = (
+                {
+                    "runbook_id": entry.runbook_id,
+                    "revision": entry.revision,
+                    "content_hash": entry.content_hash,
+                    "action": entry.action,
+                    "target": entry.target,
+                    "script_id": entry.script_id,
+                    "script_path": entry.script_path,
+                    "script_sha256": entry.script_sha256,
+                }
+                if entry is not None
+                else None
+            )
+            entry_digest = (
+                canonical_binding_digest(entry_document)
+                if entry_document is not None
+                else None
+            )
+            if (
+                entry is None
+                or entry_digest != execution_binding["catalog_entry_digest"]
+                or entry.script_sha256 != execution_binding["script_sha256"]
+                or entry.script_path != script_path
+            ):
+                return refuse(
+                    "the catalog no longer maps this proposal's bound script",
+                    digest=frozen.invocation_digest,
+                    failure_code="binding-catalog-changed",
+                )
+            profile = catalog_profiles.get(execution_binding["runner_profile_id"])
+            if (
+                profile is None
+                or profile.digest() != execution_binding["runner_profile_digest"]
+            ):
+                return refuse(
+                    "the runner profile has changed since this proposal was bound",
+                    digest=frozen.invocation_digest,
+                    failure_code="binding-profile-changed",
+                )
 
         # 4. The frozen invocation must be the one the evidence describes —
         #    including the runbook revision binding (runbook-format.md: the
@@ -357,7 +442,12 @@ class ExecutionGate:
         refusal_bits: list[str] = []
         for standing in self._policy.standing:
             try:
-                standing_result = match(standing, frozen.invocation, resolved_script)
+                standing_result = match(
+                standing,
+                frozen.invocation,
+                resolved_script,
+                runner_profile_digest=execution_binding["runner_profile_digest"],
+            )
             except ProposalError as error:
                 refusal_bits.append(f"standing: {error}")
                 continue
@@ -394,6 +484,8 @@ class ExecutionGate:
                     "phase": "pre-execution",
                     "script_path": resolved_script.path,
                     "script_sha256": resolved_script.sha256,
+                    "execution_binding_digest": binding_document["digest"],
+                    "runner_profile_id": execution_binding["runner_profile_id"],
                     "owner_id": self._owner.id,
                     "observations": observation_provenance,
                 },
@@ -428,38 +520,87 @@ class ExecutionGate:
         #    the path (issue #34, no TOCTOU gap). A BaseException (e.g.
         #    SystemExit) is recorded as a failure before it propagates so the
         #    execution never ends without an outcome attempt.
-        try:
-            reported = executor(consumed.invocation, script_bytes)
-            if reported not in _OUTCOMES:
-                raise ValueError(
-                    f"executor must report success or unknown, got {reported!r}"
+        failure_code: str | None = None
+        if executor is None:
+            # Production dispatch (issue #64): the staged runner bound to the
+            # proposal's runner profile. The staged bytes are already
+            # hash-verified above. The runner reports all three outcomes
+            # (success / failure / unknown) and never raises past this
+            # point; an unexpected crash is still recorded as a failure
+            # before it propagates.
+            from ops_guard.execution_binding import run_staged
+
+            profile = self._runner_profiles[execution_binding["runner_profile_id"]]
+            try:
+                runner_result = run_staged(
+                    profile,
+                    script_path=script_path,
+                    script_bytes=script_bytes,
+                    script_sha256=resolved_sha256,
+                    invocation=consumed.invocation.to_json(),
                 )
-        except (TimeoutError, subprocess.TimeoutExpired):
-            # A timeout leaves completion unconfirmed: explicitly unknown,
-            # never a known failure (issue #38).
-            self._audit.append(
-                "execution_outcome",
-                payload={"outcome": "unknown"},
-                correlation_id=frozen.proposal_id,
-                proposal_ref=frozen.proposal_id,
-                invocation_digest=frozen.invocation_digest,
-                authorization_path=path,
-                outcome="unknown",
-                failure_code="executor-timeout",
-            )
-            raise
-        except BaseException:  # noqa: BLE001 - failure is an outcome
-            self._audit.append(
-                "execution_outcome",
-                payload={"outcome": "failure"},
-                correlation_id=frozen.proposal_id,
-                proposal_ref=frozen.proposal_id,
-                invocation_digest=frozen.invocation_digest,
-                authorization_path=path,
-                outcome="failure",
-                failure_code="executor-error",
-            )
-            raise
+            except BaseException as error:  # noqa: BLE001 - recorded as failure
+                self._audit.append(
+                    "execution_outcome",
+                    payload={"outcome": "failure"},
+                    correlation_id=frozen.proposal_id,
+                    proposal_ref=frozen.proposal_id,
+                    invocation_digest=frozen.invocation_digest,
+                    authorization_path=path,
+                    outcome="failure",
+                    failure_code="executor-error",
+                )
+                raise
+            reported = runner_result.outcome
+            failure_code = runner_result.failure_code
+            if reported not in ("success", "failure", "unknown"):
+                self._audit.append(
+                    "execution_outcome",
+                    payload={"outcome": "failure"},
+                    correlation_id=frozen.proposal_id,
+                    proposal_ref=frozen.proposal_id,
+                    invocation_digest=frozen.invocation_digest,
+                    authorization_path=path,
+                    outcome="failure",
+                    failure_code="executor-error",
+                )
+                raise ValueError(
+                    f"runner must report success, failure or unknown, got {reported!r}"
+                )
+        else:
+            # Test/injected executor: timeouts leave completion unconfirmed
+            # (explicitly unknown, never a known failure, issue #38); every
+            # other exception is a recorded failure that still propagates.
+            try:
+                reported = executor(consumed.invocation, script_bytes)
+                if reported not in _OUTCOMES:
+                    raise ValueError(
+                        f"executor must report success or unknown, got {reported!r}"
+                    )
+            except (TimeoutError, subprocess.TimeoutExpired):
+                self._audit.append(
+                    "execution_outcome",
+                    payload={"outcome": "unknown"},
+                    correlation_id=frozen.proposal_id,
+                    proposal_ref=frozen.proposal_id,
+                    invocation_digest=frozen.invocation_digest,
+                    authorization_path=path,
+                    outcome="unknown",
+                    failure_code="executor-timeout",
+                )
+                raise
+            except BaseException:  # noqa: BLE001 - failure is an outcome
+                self._audit.append(
+                    "execution_outcome",
+                    payload={"outcome": "failure"},
+                    correlation_id=frozen.proposal_id,
+                    proposal_ref=frozen.proposal_id,
+                    invocation_digest=frozen.invocation_digest,
+                    authorization_path=path,
+                    outcome="failure",
+                    failure_code="executor-error",
+                )
+                raise
 
         self._audit.append(
             "execution_outcome",
@@ -468,6 +609,7 @@ class ExecutionGate:
             proposal_ref=frozen.proposal_id,
             invocation_digest=frozen.invocation_digest,
             authorization_path=path,
+            failure_code=failure_code,
             outcome=reported,
         )
         return GateOutcome(

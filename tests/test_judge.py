@@ -367,16 +367,50 @@ def test_orchestrator_failure_becomes_closed_judge_error(tmp_path, monkeypatch) 
     assert set(projection) <= ALLOWED_PROJECTION_FIELDS
 
 
+def test_judge_error_with_null_fingerprint_keeps_projection_closed(monkeypatch) -> None:
+    """The _run_one guard's judge_error is intentionally trace-less
+    (trace_id=None: the exception destroyed any partial trace) and, with
+    no fingerprint function, carries request_fingerprint=None while
+    staying within the allowed projection fields (issue #72)."""
+    transport = FakeTransport(outputs=['"routine"'] * 3)
+    judge = make_judge(transport, fingerprint=None)
+    import ops_guard.judge as judge_module
+
+    def exploding(self, envelope, question_id, question):
+        raise RuntimeError("internal explosion")
+
+    monkeypatch.setattr(judge_module.SamplingOrchestrator, "run_question", exploding)
+    projection = judge.evaluate_risk(sample_state())
+    assert projection["status"] == "judge_error"
+    assert projection["trace_id"] is None
+    assert projection["request_fingerprint"] is None
+    assert set(projection) <= ALLOWED_PROJECTION_FIELDS
+
+
 def test_fingerprint_binds_state_and_question_id() -> None:
     transport = FakeTransport(
         outputs=['"routine"', '"routine"', '"routine"', '"critical"', '"critical"', '"critical"']
     )
-    judge = make_judge(transport, fingerprint=lambda value: "fp-" + value["question_id"])
+    seen = []
+
+    def fingerprint(value):
+        seen.append({"state": value["state"], "question_id": value["question_id"]})
+        return "fp-" + value["question_id"]
+
+    judge = make_judge(transport, fingerprint=fingerprint)
     state = sample_state()
     results = judge.evaluate_question_map(state, ["q1", "q2"])
     assert results["q1"]["request_fingerprint"] != results["q2"]["request_fingerprint"]
     again = judge.evaluate_question_map(state, ["q1", "q2"])
     assert again["q1"]["request_fingerprint"] == results["q1"]["request_fingerprint"]
+    # both halves of the wrapped preimage: the exact state and the
+    # question it was asked under, on every call (#72)
+    assert seen == [
+        {"state": state, "question_id": "q1"},
+        {"state": state, "question_id": "q2"},
+        {"state": state, "question_id": "q1"},
+        {"state": state, "question_id": "q2"},
+    ]
 
 def test_think_disabled_toggle_is_injected_into_every_payload() -> None:
     """ADR 0009 amendment: thinking is disabled at the transport boundary."""

@@ -699,8 +699,14 @@ def _resume_process(process_handle: Any) -> None:
     import ctypes
 
     ntdll = ctypes.WinDLL("ntdll")
-    ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
-    status = ntdll.NtResumeProcess(ctypes.c_void_p(int(process_handle)))
+    try:
+        nt_resume = ntdll.NtResumeProcess
+    except AttributeError:
+        # A missing export must reach the arming handler as OSError so the
+        # suspended child is killed and the outcome fails closed (ADR 0012).
+        raise OSError("NtResumeProcess is unavailable on this host") from None
+    nt_resume.argtypes = [ctypes.c_void_p]
+    status = nt_resume(ctypes.c_void_p(int(process_handle)))
     if status != 0:
         raise OSError(f"NtResumeProcess failed (NTSTATUS {status:#x})")
 
@@ -713,20 +719,25 @@ def _await_tree_exit(
     """Best-effort wait until the killed tree is actually gone before the
     runner returns: job termination and killpg are asynchronous, and the
     contract is that no in-job (or in-group) descendant outlives the
-    dispatch outcome the caller observes. A failed drain query degrades
-    to returning after the deadline without changing the outcome."""
+    dispatch outcome the caller observes. A failed drain query (None)
+    retries until the deadline instead of returning early; on POSIX only
+    ProcessLookupError ends the wait."""
     deadline = time.monotonic() + timeout
     if job is not None:
         while time.monotonic() < deadline:
             active = job.active_processes()
-            if active is None or active == 0:
+            if active == 0:
                 return
+            # A failed query (None) degrades to the bounded wait: sleep and
+            # retry until the deadline instead of skipping the drain.
             time.sleep(0.05)
         return
     if hasattr(os, "killpg") and hasattr(os, "setsid"):
         while time.monotonic() < deadline:
             try:
                 os.killpg(process.pid, 0)
-            except OSError:
+            except ProcessLookupError:
                 return  # the whole group is gone
+            except OSError:
+                pass  # e.g. EPERM: keep polling until the deadline
             time.sleep(0.05)

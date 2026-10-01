@@ -617,3 +617,77 @@ def test_arming_failure_fails_closed(tmp_path, monkeypatch) -> None:
     )
     assert result.outcome == "unknown"
     assert result.failure_code == "spawn-failure"
+
+
+def test_failed_drain_query_still_waits(tmp_path, monkeypatch) -> None:
+    """A failed ActiveProcesses query must degrade to the bounded drain
+    wait, not skip it (ADR 0012 containment hardening)."""
+    import hashlib as hl
+    import time as tm
+    from dataclasses import replace
+
+    import ops_guard.execution_binding as eb
+
+    if os.name != "nt":
+        pytest.skip("Job Objects are Windows-specific")
+    profile = replace(
+        PROFILE,
+        working_directory=str(tmp_path),
+        executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+    )
+
+    def failing_query(self):
+        return None
+
+    monkeypatch.setattr(eb._WindowsJob, "active_processes", failing_query)
+    body = _fixture("import json,sys; sys.exit(0)")
+    started = tm.monotonic()
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    elapsed = tm.monotonic() - started
+    assert result.outcome == "success"
+    # With every ActiveProcesses query failing, the drain must burn its
+    # full bound instead of returning early (the cycle-7 defect).
+    assert elapsed >= 5.0, f"drain skipped: returned in {elapsed:.2f}s"
+
+
+def test_missing_resume_export_fails_closed(tmp_path, monkeypatch) -> None:
+    """A missing NtResumeProcess export reaches the arming handler as
+    OSError: the child is killed and the outcome is unknown/spawn-failure,
+    never an exception past the runner (ADR 0012)."""
+    import ctypes as _ctypes
+    import hashlib as hl
+    from dataclasses import replace
+
+    import ops_guard.execution_binding as eb
+
+    if os.name != "nt":
+        pytest.skip("Job Objects are Windows-specific")
+    never_ran = tmp_path / "script-ran"
+    profile = replace(
+        PROFILE,
+        working_directory=str(tmp_path),
+        executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+    )
+
+    class _FakeNtdll:
+        def __getattr__(self, name):
+            raise AttributeError(f"module has no attribute {name!r}")
+
+    monkeypatch.setattr(_ctypes, "WinDLL", lambda *a, **k: _FakeNtdll())
+    body = _fixture(f"open({str(never_ran)!r}, 'w').write('ran')")
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    assert result.outcome == "unknown"
+    assert result.failure_code == "spawn-failure"
+    assert not never_ran.exists(), "the suspended child must never execute"

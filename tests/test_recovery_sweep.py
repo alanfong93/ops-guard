@@ -92,9 +92,9 @@ def test_missing_files_and_nondirs_are_ignored(tmp_path) -> None:
 
 
 def test_junction_is_neither_followed_nor_fatal(tmp_path) -> None:
-    """A junction planted in the temp root (even one that raises on
-    stat) is skipped without aborting the sweep, and other candidates
-    are still processed (#81 hardening; post-merge review of #85)."""
+    """An attributable junction whose target cannot be stat'd through is
+    skipped without aborting the sweep, and the real dead-owner sibling
+    is still removed (#81 hardening; post-merge review of #85)."""
     import _winapi
 
     if os.name != "nt":
@@ -105,13 +105,12 @@ def test_junction_is_neither_followed_nor_fatal(tmp_path) -> None:
     owner.close()
     root = tmp_path / "tmp"
     root.mkdir()
-    # a junction whose name does not even match the attributable pattern,
-    # pointing at an unreadable-by-design system directory
-    target = tmp_path / "junction-target"
-    target.mkdir()
-    _winapi.CreateJunction(str(target), str(root / "ops-guard-exec-nothex"))
+    # the reported vector: an ATTRIBUTABLE junction name pointing at a
+    # system directory this process cannot read through
+    junction_name = root / f"ops-guard-exec-{owner_id}-ffeeddcc"
+    _winapi.CreateJunction(r"C:\System Volume Information", str(junction_name))
     staged = _staging_dir(root, owner_id)  # dead owner: must still be swept
     removed = sweep_exec_tmp_leftovers(owners, temp_root=root)
     assert removed == [str(staged)]
     assert not staged.exists()
-    assert (root / "ops-guard-exec-nothex").exists()  # untouched
+    assert junction_name.is_junction()  # the junction itself: untouched

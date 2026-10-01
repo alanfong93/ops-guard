@@ -54,9 +54,9 @@ flowchart TD
     CHECK -->|"Yes"| STANDS["Append nothing — outcome stands"]
     CHECK -->|"No"| UNKNOWN["Append exactly one unknown outcome, failure_code owner-dead, in the same transaction as the check"]
     UNKNOWN --> NEVER["Never retry or re-execute the operation"]
-    UNKNOWN --> TMP["Best-effort temp sweep: remove only that owner's attributable staging dir — live, indeterminate, junction/symlink, and non-matching names stay"]
     UNKNOWN --> AUDIT_LOG
     STANDS --> AUDIT_LOG
+    SWEEP --> TMP["After reconciliation — once per startup: best-effort temp sweep removing every dead-owner attributable staging dir; live, indeterminate, junction/symlink, and non-matching names stay"]
     TMP --> AUDIT_LOG
 
     style UNRESOLVED fill:#fff3cd,stroke:#b58900,color:#000

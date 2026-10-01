@@ -691,3 +691,109 @@ def test_missing_resume_export_fails_closed(tmp_path, monkeypatch) -> None:
     assert result.outcome == "unknown"
     assert result.failure_code == "spawn-failure"
     assert not never_ran.exists(), "the suspended child must never execute"
+
+
+def test_unspawnable_executable_maps_to_spawn_failure(tmp_path) -> None:
+    """A real Popen failure (invalid working directory) is an uncertain
+    completion audited spawn-failure — it never propagates past the
+    runner (#83). The wait()-OSError label is locked separately by
+    test_wait_oserror_maps_to_executor_error."""
+    import hashlib as hl
+    from dataclasses import replace
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    profile = replace(
+        PROFILE,
+        working_directory=str(blocker),  # a file: Popen raises
+        executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+    )
+    body = _fixture("import json,sys; sys.exit(0)")
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    assert result.outcome == "unknown"
+    assert result.failure_code == "spawn-failure"
+
+
+def test_popen_oserror_maps_to_spawn_failure(tmp_path, monkeypatch) -> None:
+    """Any OSError from the spawn call itself maps to unknown/spawn-failure
+    deterministically (#83)."""
+    import hashlib as hl
+    import subprocess as sp
+    from dataclasses import replace
+
+    import ops_guard.execution_binding as eb
+
+    def boom(*args, **kwargs):
+        raise OSError("spawn is unavailable")
+
+    monkeypatch.setattr(eb.subprocess, "Popen", boom)
+    profile = replace(
+        PROFILE,
+        working_directory=str(tmp_path),
+        executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+    )
+    body = _fixture("import json,sys; sys.exit(0)")
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    assert result.outcome == "unknown"
+    assert result.failure_code == "spawn-failure"
+
+
+def test_wait_oserror_maps_to_executor_error(tmp_path, monkeypatch) -> None:
+    """An OSError from wait() after a successful spawn is an internal
+    runner error: unknown/executor-error, not spawn-failure (#83). The
+    child is terminated before the runner returns."""
+    import hashlib as hl
+    import subprocess as sp
+    from dataclasses import replace
+
+    import ops_guard.execution_binding as eb
+
+    captured = []
+    real_popen = sp.Popen
+
+    def popen_then_failing_wait(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        captured.append(child)
+
+        def failing_wait(timeout=None):
+            raise OSError("wait is unavailable")
+
+        child.wait = failing_wait
+        return child
+
+    monkeypatch.setattr(eb.subprocess, "Popen", popen_then_failing_wait)
+    profile = replace(
+        PROFILE,
+        working_directory=str(tmp_path),
+        executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+    )
+    body = _fixture("import time; time.sleep(10)")
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    assert result.outcome == "unknown"
+    assert result.failure_code == "executor-error"
+    # the runner killed the child on the error path (the script sleeps
+    # 10s, so any returncode proves the kill): termination accounting can
+    # lead handle signaling slightly, so poll within a short bound
+    child = captured[0]
+    deadline = __import__("time").monotonic() + 2
+    while child.poll() is None and __import__("time").monotonic() < deadline:
+        __import__("time").sleep(0.05)
+    assert child.poll() is not None, "child survived the executor-error path"

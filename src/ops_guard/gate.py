@@ -538,6 +538,7 @@ class ExecutionGate:
                     script_bytes=script_bytes,
                     script_sha256=resolved_sha256,
                     invocation=consumed.invocation.to_json(),
+                    owner_id=self._owner.id,
                 )
             except BaseException as error:  # noqa: BLE001 - recorded as failure
                 self._audit.append(

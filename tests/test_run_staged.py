@@ -503,3 +503,60 @@ def test_job_object_kills_surviving_grandchild(tmp_path) -> None:
         tm.sleep(0.1)
     handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
     assert not handle, "grandchild survived the Job Object kill"
+
+def test_detached_grandchild_killed_by_job_close(tmp_path) -> None:
+    """Windows: kill-on-close (not just TerminateJobObject on the still-open
+    path) terminates a detached grandchild that outlives a clean direct
+    child exit."""
+    import hashlib as hl
+    import time as tm
+    from ops_guard.execution_binding import RunnerProfile, run_staged
+
+    if os.name != "nt":
+        pytest.skip("Job Objects are Windows-specific")
+    marker = tmp_path / "grandchild-alive"
+    marker.write_text("alive")
+    profile = RunnerProfile(
+        profile_id="detached",
+        executable=sys.executable,
+        executable_sha256=hl.sha256(open(sys.executable, "rb").read()).hexdigest(),
+        argv=(sys.executable,),
+        working_directory=str(tmp_path),
+        env_allowlist=("PATH", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC"),
+        timeout_seconds=10,
+    )
+    spawn_line = "import time; time.sleep(30)"
+    inner = f"import subprocess, sys; subprocess.Popen([{sys.executable!r}, '-c', {spawn_line!r}])"
+    body = (
+        "import subprocess, sys\n"
+        f"subprocess.Popen([{sys.executable!r}, '-c', {inner!r}])\n"
+        "sys.exit(0)\n"
+    ).encode()
+    result = run_staged(
+        profile,
+        script_path="fixture.py",
+        script_bytes=body,
+        script_sha256=hl.sha256(body).hexdigest(),
+        invocation={"action": "restart"},
+    )
+    # The detached grandchild inherits the runner's stdio pipes, so the
+    # still-open detection fires: explicitly unknown (ADR 0005), the job is
+    # terminated, and the grandchild dies with the tree.
+    assert result.outcome == "unknown"
+    import ctypes
+
+    deadline = tm.monotonic() + 10
+    pid_file = tmp_path / "grandchild-alive"
+    grandchild_pid = None
+    while tm.monotonic() < deadline:
+        try:
+            grandchild_pid = int(pid_file.read_text())
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid)
+            if not handle:
+                break  # dead
+            ctypes.windll.kernel32.CloseHandle(handle)
+        except (OSError, ValueError):
+            break
+        tm.sleep(0.1)
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, grandchild_pid or 0)
+    assert not handle, "grandchild survived kill-on-close"

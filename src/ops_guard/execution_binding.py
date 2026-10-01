@@ -499,6 +499,7 @@ def run_staged(
         return RunnerResult(outcome="failure", failure_code="runner-executable-mismatch")
 
     tmp_dir = tempfile.mkdtemp(prefix="ops-guard-exec-")
+    job = None
     try:
         staged_path = os.path.join(tmp_dir, "staged-script")
         with open(staged_path, "wb") as handle:
@@ -524,7 +525,6 @@ def run_staged(
             shell=False,
             start_new_session=True,  # POSIX: own process group for tree kill
         )
-        job = None
         if os.name == "nt":
             try:
                 job = _WindowsJob()

@@ -128,14 +128,22 @@ def sweep_exec_tmp_leftovers(
     except OSError:
         return removed
     for candidate in candidates:
-        if not candidate.is_dir():
+        try:
+            # Junctions and symlinked dirs are never ours and are never
+            # followed: classification does not traverse them, and one
+            # unreadable or hostile candidate never aborts the sweep.
+            if candidate.is_symlink() or candidate.is_junction():
+                continue
+            if not candidate.is_dir(follow_symlinks=False):
+                continue
+            match = _STAGED_DIR_RE.match(candidate.name)
+            if match is None:
+                continue
+            if ExecutionOwner.probe(owners_dir, match.group(1)) != "dead":
+                continue
+            shutil.rmtree(candidate, ignore_errors=True)
+            if not candidate.exists():
+                removed.append(str(candidate))
+        except OSError:
             continue
-        match = _STAGED_DIR_RE.match(candidate.name)
-        if match is None:
-            continue
-        if ExecutionOwner.probe(owners_dir, match.group(1)) != "dead":
-            continue
-        shutil.rmtree(candidate, ignore_errors=True)
-        if not candidate.exists():
-            removed.append(str(candidate))
     return removed

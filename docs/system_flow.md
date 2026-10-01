@@ -54,11 +54,13 @@ flowchart TD
     CHECK -->|"Yes"| STANDS["Append nothing — outcome stands"]
     CHECK -->|"No"| UNKNOWN["Append exactly one unknown outcome, failure_code owner-dead, in the same transaction as the check"]
     UNKNOWN --> NEVER["Never retry or re-execute the operation"]
+    UNKNOWN --> TMP["Best-effort temp sweep: remove only that owner's attributable staging dir — live, indeterminate, junction/symlink, and non-matching names stay"]
     UNKNOWN --> AUDIT_LOG
     STANDS --> AUDIT_LOG
+    TMP --> AUDIT_LOG
 
     style UNRESOLVED fill:#fff3cd,stroke:#b58900,color:#000
     style UNKNOWN fill:#bbf7d0,stroke:#166534,color:#000
 ```
 
-Each execution-start record names the gate process instance (a random owner ID, not a PID) that dispatched it; that instance holds an OS exclusive lock file for its lifetime, so acquiring the lock later is positive proof the owner is gone. The sweep is idempotent — a recovered execution carries its terminal outcome and is never touched again.
+Each execution-start record names the gate process instance (a random owner ID, not a PID) that dispatched it; that instance holds an OS exclusive lock file for its lifetime, so acquiring the lock later is positive proof the owner is gone. The sweep is idempotent — a recovered execution carries its terminal outcome and is never touched again. The same startup also sweeps the system temp dir for staging directories abandoned by a crash (`ops-guard-exec-<owner>-…`): a directory is removed only when its owning owner is positively proven dead, junctions and symlinks are never followed, and the sweep is best effort — it never blocks startup (docs/adr/0012-proposal-bound-execution-artifact.md).

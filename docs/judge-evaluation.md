@@ -19,7 +19,7 @@ report is a valid evaluation outcome, not a broken gate.
   gate implementation.
 - Fixed: 3 sequential samples, temperature 0, `timeout_ms=10000`,
   identifiers `ops-guard-risk-state-v1` / `ops-guard-risk-rubric-v1` /
-  `ops-guard-risk-prompt-v1`, menu definitions from ADR 0009.
+  `ops-guard-risk-prompt-v2` (issue #74 corrective; v1 abstained on every input under the sample union), menu definitions from ADR 0009.
 - Corpus: `evaluation/judge/manifest.json` (`ops-guard-judge-corpus-v1`),
   256 cases — 6 deterministic fixtures (one per contract category), 50
   labelled normal, 20 ambiguous (explicit allowed-answer sets), 20

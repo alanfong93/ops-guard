@@ -465,11 +465,16 @@ def run_staged(
         ]
         for reader in readers:
             reader.start()
-        try:
-            process.stdin.write(stdin_payload)
-            process.stdin.close()
-        except OSError:
-            pass  # a child that closed stdin early must not crash the runner
+
+        def _write_stdin() -> None:
+            try:
+                process.stdin.write(stdin_payload)
+                process.stdin.close()
+            except OSError:
+                pass  # a child that closed stdin early must not crash the runner
+
+        writer = _threading.Thread(target=_write_stdin, daemon=True)
+        writer.start()
         try:
             process.wait(timeout=profile.timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -477,6 +482,7 @@ def run_staged(
             return RunnerResult(outcome="unknown", failure_code="executor-timeout")
         except OSError:
             return RunnerResult(outcome="unknown", failure_code="spawn-failure")
+        writer.join(timeout=5)
         for reader in readers:
             reader.join(timeout=5)
         if overflow["stdout"] or overflow["stderr"]:

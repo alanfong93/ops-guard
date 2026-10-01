@@ -554,6 +554,16 @@ class ExecutionGate:
             reported = runner_result.outcome
             failure_code = runner_result.failure_code
             if reported not in ("success", "failure", "unknown"):
+                self._audit.append(
+                    "execution_outcome",
+                    payload={"outcome": "failure"},
+                    correlation_id=frozen.proposal_id,
+                    proposal_ref=frozen.proposal_id,
+                    invocation_digest=frozen.invocation_digest,
+                    authorization_path=path,
+                    outcome="failure",
+                    failure_code="executor-error",
+                )
                 raise ValueError(
                     f"runner must report success, failure or unknown, got {reported!r}"
                 )

@@ -61,6 +61,12 @@ The truncated keyed HMAC persisted in place of a redacted sensitive value so the
 ### Runbook revision
 The immutable, human-verified unit of procedural evidence: one operation, its preconditions, its passages, and verification metadata, identified by a content hash that must recompute exactly. Authority: [runbook format](docs/runbook-format.md). Rejected alias: **"the runbook"** — loose speech for a living document; only an immutable revision can back a citation.
 
+### Delegated verification
+A human verification performed by a named delegate under the operator's written delegation, recorded in the revision's `verifier` string with the literal marker `delegated by <operator>, <date>` — mechanically distinguishable from a personal verification, which names the operator alone. A delegated revision is human-verified evidence, but it is un-ratified until a superseding revision records a personal verifier. Authority: [runbook format](docs/runbook-format.md); history: [ADR 0007](docs/adr/0007-public-runbooks-operator-local-scripts.md). Rejected alias: **"AI-verified"** — the authority is the operator's delegation, not the model; the string names both.
+
+### Ratification
+The operator's post-return personal confirmation of a delegated verification: always a superseding revision with a personal verifier and a new content hash — never an edit of the delegated revision, never a separate sign-off field. A veto is the same mechanism with replaced content. Authority: [runbook format](docs/runbook-format.md); history: [ADR 0007](docs/adr/0007-public-runbooks-operator-local-scripts.md). Rejected alias: **"sign-off"** — that suggests a field or ceremony outside the revision; ratification is just the next revision's verifier string.
+
 ### Citation
 A reference binding one passage locator to one runbook revision content hash. It qualifies as required procedural evidence only when the revision is verified and unchanged. Authority: [runbook format](docs/runbook-format.md). Rejected alias: **"quote"** — a quotation without revision binding drifts when the document changes and is not evidence.
 

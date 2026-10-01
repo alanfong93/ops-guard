@@ -35,6 +35,13 @@ Exactly these keys, no others:
 - `preconditions` — list of `{name, expected}` objects with non-empty string fields; may be empty.
 - `passages` — non-empty list; `locator`s are unique non-empty strings; `text` is non-empty.
 - `verification` — non-empty `verifier`, timezone-aware `verified_at`, non-empty `applicability`. Absent or blank verification means the revision is not human-verified and can never qualify.
+
+**Personal vs delegated verification.** The `verifier` string takes one of two forms, mechanically distinguishable by the literal marker `delegated by `:
+
+- **Personal**: the operator names themselves — `<operator>` (for example `alan`). The operator reviewed the exact revision content.
+- **Delegated**: the review was performed by a named delegate under the operator's written delegation — `<delegate> review (delegated by <operator>, <date>)` (for example `agent-tribunal review (delegated by alan, 2026-09-29)`). The string records the delegate, the delegating operator, and the delegation date; it never attributes the review to the operator personally.
+
+**Ratification.** A delegated verification is ratified when a superseding revision records a personal verifier (see above) for the same operation — ratification is always a new immutable revision with a new content hash, never an edit of the delegated one. Until then the delegated revision is un-ratified: it qualifies as human-verified evidence (the delegate reviewed it under real delegated authority, docs/adr/0007-public-runbooks-operator-local-scripts.md), and downstream readers can mechanically tell the difference. A veto is also a superseding revision — one that drops or replaces the delegated content.
 - `content_hash` — SHA-256 hex of the JCS (RFC 8785) canonicalization of the revision document **without** the `content_hash` key: the hash binds the parsed document's values as stored (encodings that parse to the same value — escapes, key order — share one hash; storage must round-trip a JSON parse). Any change to any other value — including timestamp spelling — changes the hash. The hash is lowercase hexadecimal.
 
 **Trust boundary.** Verification metadata is operator-curated and unauthenticated: the `verifier` string records who reviewed the procedure, and whoever can write a revision into the store holds the authority to certify evidence. The execution gate (#14) binds proposals to the revision content hash; the store's write path is the control point.

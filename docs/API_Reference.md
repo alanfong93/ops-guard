@@ -153,7 +153,7 @@ top-level inputs; extra fields are rejected.
   locator difference visible.
 
 - **Advisory judgment (audit-only)** — every `propose_fix` call also records
-  a local risk judgment on the proposal audit event
+  a risk judgment on the proposal audit event
   ([ADR 0009](adr/0009-local-advisory-judge-audit-projection.md)): a closed
   `ops-guard-risk-projection-v1` projection (risk class from the fixed
   `routine`/`review`/`critical` menu, vote share, repeated-sample agreement,
@@ -163,7 +163,14 @@ top-level inputs; extra fields are rejected.
   `judge_invalid_output`, `judge_input_rejected`, `judge_error`). The
   judgment is **not returned in this response** and never influences
   proposal issuance, authorization, or execution. A judge failure never
-  blocks proposal creation.
+  blocks proposal creation. With the operator opt-in
+  `OPS_GUARD_JUDGE_BACKEND=jev`, the recorded projection is instead the
+  closed `ops-guard-jev-projection-v1`
+  ([ADR 0014](adr/0014-approved-field-hosted-jev-advisory.md)) — declared
+  hosted identity, ordered response models, request HMACs, sample counts,
+  and the serving fingerprint — computed from an operator egress policy's
+  approved fields only, with the same six failure codes, the same
+  audit-only role, and an unchanged response shape for this tool.
 
 ### Search recording
 

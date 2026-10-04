@@ -257,3 +257,82 @@ def test_mismatched_certificate_and_key_fail_validation(tmp_path) -> None:
     assert "OPS_GUARD_TLS_CERTFILE / OPS_GUARD_TLS_KEYFILE" in message
     assert "key values mismatch" in message
     assert type(raised.value.__cause__).__name__ == "SSLError"
+
+
+# ---- judge backend selection (issue #91; ADR 0014) -------------------------
+
+
+JEV_ENV = {
+    "OPS_GUARD_JUDGE_BACKEND": "jev",
+    "OPS_GUARD_JEV_ENDPOINT": "https://jev.example/v1/systemone",
+    "OPS_GUARD_JEV_ALLOWED_ENDPOINTS": "https://jev.example:443/v1/systemone",
+    "OPS_GUARD_JEV_BEARER_TOKEN": "j" * 40,
+    "OPS_GUARD_JEV_EGRESS_POLICY_FILE": "policy.json",
+}
+
+
+def _config_for(monkeypatch, environ):
+    import os
+
+    from ops_guard.service import ServiceConfig, _build_judge
+
+    class _FakeAudit:
+        def fingerprint(self, value):
+            return "0" * 16
+
+    config = ServiceConfig(
+        bearer_token="h" * 40,
+        proposal_token_key=b"\xaa" * 32,
+        audit_fingerprint_key=b"\xbb" * 32,
+        db_path="proposals.db",
+        runbook_dir="runbooks",
+        bind_host="127.0.0.1",
+        port=8443,
+        tls_certfile="cert.pem",
+        tls_keyfile="key.pem",
+        allowed_hosts=("localhost",),
+        allowed_origins=("https://ops-guard.lan",),
+        proposal_ttl_seconds=900,
+    )
+    monkeypatch.setattr(os, "environ", environ)
+    return _build_judge(config, _FakeAudit())
+
+
+def test_default_backend_is_the_local_judge(monkeypatch) -> None:
+    from ops_guard.judge import LocalJudge
+
+    monkeypatch.delenv("OPS_GUARD_JUDGE_BACKEND", raising=False)
+    assert isinstance(_config_for(monkeypatch, {}), LocalJudge)
+
+
+def test_explicit_local_backend_selects_the_local_judge(monkeypatch) -> None:
+    from ops_guard.judge import LocalJudge
+
+    assert isinstance(_config_for(monkeypatch, {"OPS_GUARD_JUDGE_BACKEND": "local"}), LocalJudge)
+
+
+def test_unknown_backend_fails_configuration(monkeypatch) -> None:
+    with pytest.raises(ConfigurationError, match="OPS_GUARD_JUDGE_BACKEND"):
+        _config_for(monkeypatch, {"OPS_GUARD_JUDGE_BACKEND": "full-state"})
+
+
+def test_enabled_jev_backend_without_settings_fails_startup_naming_the_variable(monkeypatch) -> None:
+    from ops_guard.service import StartupError
+
+    with pytest.raises(StartupError, match="OPS_GUARD_JEV_ENDPOINT"):
+        _config_for(monkeypatch, {"OPS_GUARD_JUDGE_BACKEND": "jev"})
+
+
+def test_enabled_jev_backend_loads_the_hosted_judge(monkeypatch, tmp_path) -> None:
+    import json
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+    from ops_guard.jev import JevJudge
+    from jev_fixtures import demo_grant, write_policy_file
+
+    policy_path = write_policy_file(demo_grant(), str(tmp_path))
+    environ = dict(JEV_ENV, OPS_GUARD_JEV_EGRESS_POLICY_FILE=policy_path)
+    judge = _config_for(monkeypatch, environ)
+    assert isinstance(judge, JevJudge)
+    assert judge._config.policy.grants[0].invocation_sha256 == demo_grant().invocation_sha256

@@ -12,6 +12,7 @@ C4Context
     System_Ext(approval, "Approval channel", "Independent Telegram transport (dedicated bot, private operator DM) that authenticates the configured operator's proposal-bound approval.")
     System_Ext(audit, "Audit storage", "Durable operational history managed by ops-guard.")
     System_Ext(systems, "Managed systems", "Self-hosted production systems reached only through approved ops-guard operations.")
+    System_Ext(jev, "Hosted Jev gateway", "Opt-in, operator-allowlisted advisory endpoint; receives exact approved projection bytes only (ADR 0014).")
 
     Rel(operator, host, "Directs operational work")
     Rel(host, guard, "Uses MCP over LAN HTTPS: bearer token, TLS, Host/Origin allowlists")
@@ -19,6 +20,7 @@ C4Context
     Rel(guard, approval, "Verifies proposal-bound approval")
     Rel(guard, audit, "Records requests and outcomes")
     Rel(guard, systems, "Executes gated operations")
+    Rel(guard, jev, "Opt-in: sends approved-field projections for the audit-only advisory")
 ```
 
 The deployment boundary for the running service is `python -m ops_guard`
@@ -65,6 +67,38 @@ process calls the local Ollama HTTP API on a literal loopback address
 environment variables are ignored and redirects are never followed, so
 judge traffic cannot leave the machine. Only the closed, versioned
 projection is persisted; the raw trace never reaches the audit log.
+
+The hosted advisory is an opt-in second judge backend
+([ADR 0014](adr/0014-approved-field-hosted-jev-advisory.md)): with
+`OPS_GUARD_JUDGE_BACKEND=jev` the server replaces the loopback call with
+one internal native adapter talking HTTPS to a single operator-allowlisted
+endpoint. The outbound input is not the invocation — it is an exact-record
+reconstruction from an operator-owned egress policy (one profile per
+complete invocation hash plus citation tuple, partitioning the invocation's
+terminal leaves into explicitly approved values and explicitly reasoned
+omissions). Unsupported input is rejected before any byte leaves the
+process; the transport verifies certificates, ignores proxies, follows no
+redirects, caps request and response at 64 KiB, and runs three sequential
+samples under a total monotonic 10-second deadline each, stopping on the
+first failed sample. The persisted snapshot is the closed
+`ops-guard-jev-projection-v1` projection with the same six failure codes;
+native confidence and probabilities are validated and dropped, never voted
+with, persisted, or exposed, and the vendor model version is declared
+hosted identity, not an immutable weights digest.
+
+```mermaid
+sequenceDiagram
+    participant S as ops-guard server
+    participant G as Hosted Jev gateway (allowlisted endpoint)
+    participant A as Audit storage
+    S->>S: propose_fix resolves evidence; egress policy selects one profile
+    Note over S: mismatch, drift, or unsupported shape → judge_input_rejected, zero requests
+    S->>S: project ops-guard-jev-state-v1 from approved leaves only; serialize exact bytes once
+    S->>G: POST exact bytes (Bearer, TLS verified, no proxy, no redirect, ≤64 KiB, 10 s total deadline)
+    G-->>S: HTTP 200 closed {model, answers, usage} (any other status/timeout/oversize stops the assessment)
+    S->>S: strict parse ×3 samples; aggregate labels per question; drop confidence/probabilities
+    S->>A: closed ops-guard-jev-projection-v1 on the proposal event (request HMACs, counts, serving fingerprint; never raw state or outputs)
+```
 
 The audit record is append-only operational history. It is not a tamper-evident ledger and does not itself protect against storage-level deletion; deployments needing that assurance must retain audit records independently.
 

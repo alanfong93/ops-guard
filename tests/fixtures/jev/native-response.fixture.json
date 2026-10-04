@@ -1,0 +1,24 @@
+{
+  "fixture_schema": "ops-guard-jev-response-fixture-v1",
+  "response": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "risk_class": {
+        "type": "choice",
+        "choice": "routine",
+        "probabilities": {
+          "routine": 0.6,
+          "review": 0.3,
+          "critical": 0.1
+        },
+        "confidence": 0.42
+      }
+    },
+    "usage": {
+      "input_tokens": 120,
+      "output_tokens": 8
+    }
+  },
+  "exact_bytes": "{\"model\":\"jev-1.13.0\",\"answers\":{\"risk_class\":{\"type\":\"choice\",\"choice\":\"routine\",\"probabilities\":{\"routine\":0.6,\"review\":0.3,\"critical\":0.1},\"confidence\":0.42}},\"usage\":{\"input_tokens\":120,\"output_tokens\":8}}",
+  "sha256": "3f1a2c0eecaac35bb6ee25b8a373cb7aef3f68b1c0776a8d3c2f50721247dae4"
+}

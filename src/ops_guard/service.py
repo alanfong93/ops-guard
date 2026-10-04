@@ -233,6 +233,41 @@ def _operator_script_source(path: str) -> bytes:
         return handle.read()
 
 
+def _build_judge(config: ServiceConfig, audit):
+    """Select the advisory judge (issue #91; ADR 0014).
+
+    ``OPS_GUARD_JUDGE_BACKEND=local`` (default) keeps the pinned local
+    judge; ``jev`` opts into the hosted approved-field advisory and its
+    configuration is validated here — before a listener opens, naming
+    settings without their values. No automatic fallback exists."""
+    from ops_guard.judge import LocalJudge
+
+    backend = (os.environ.get("OPS_GUARD_JUDGE_BACKEND") or "local").strip()
+    if backend == "local":
+        return LocalJudge(transport=UrllibOllamaTransport(), fingerprint=audit.fingerprint)
+    if backend != "jev":
+        raise ConfigurationError(
+            "OPS_GUARD_JUDGE_BACKEND must be set to 'local' or 'jev'"
+        )
+    from ops_guard.jev import (
+        JevConfigError,
+        JevJudge,
+        compute_serving_fingerprint,
+        load_jev_config,
+    )
+
+    try:
+        jev_config = load_jev_config(os.environ)
+    except JevConfigError as error:
+        raise StartupError(f"hosted Jev judge configuration: {error}") from error
+    return JevJudge(
+        config=jev_config,
+        hmac_key=config.audit_fingerprint_key,
+        fingerprint=audit.fingerprint,
+        serving_fingerprint=compute_serving_fingerprint(jev_config),
+    )
+
+
 def build_http_server(
     config: ServiceConfig,
     operator_policy=None,
@@ -288,7 +323,7 @@ def build_http_server(
     from ops_guard.judge import LocalJudge
     from ops_guard.preconditions import default_registry, load_policy_file
 
-    judge = LocalJudge(transport=UrllibOllamaTransport(), fingerprint=audit.fingerprint)
+    judge = _build_judge(config, audit)
     execution_catalog = None
     catalog_path = os.environ.get("OPS_GUARD_EXECUTION_CATALOG")
     if catalog_path:

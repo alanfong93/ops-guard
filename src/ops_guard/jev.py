@@ -306,8 +306,9 @@ def _reject_pointer_conflicts(pointers) -> None:
     for pointer in pointers:
         tokens = parse_pointer(pointer)
         for other in seen:
-            prefix = other[: len(tokens)] if len(other) >= len(tokens) else None
-            if tokens == other or prefix == tokens:
+            # Symmetric ancestor check: whichever pointer came first, one
+            # must not be a strict segment-boundary prefix of the other.
+            if tokens == other or other[: len(tokens)] == tokens or tokens[: len(other)] == other:
                 raise EgressPolicyError(
                     f"pointer {pointer!r} duplicates or nests under an existing pointer"
                 )

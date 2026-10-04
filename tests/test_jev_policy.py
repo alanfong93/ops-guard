@@ -266,6 +266,22 @@ def test_duplicate_and_ancestor_pointer_conflicts() -> None:
         )
 
 
+@pytest.mark.parametrize("ancestor_first", [True, False])
+def test_ancestor_conflict_detected_regardless_of_order(ancestor_first) -> None:
+    ancestor, descendant = "/arguments", "/arguments/x"
+    pair = [
+        {"pointer": ancestor, "value": {}},
+        {"pointer": descendant, "value": 1},
+    ]
+    if not ancestor_first:
+        pair.reverse()
+    document = grant_document(approved_leaves=pair)
+    with pytest.raises(EgressPolicyError, match="nests|duplicates"):
+        parse_egress_policy(
+            policy_bytes({"schema_version": "ops-guard-jev-egress-v1", "profiles": [document]})
+        )
+
+
 def test_duplicate_pointer_across_approved_and_omitted_rejected() -> None:
     grant = demo_grant()
     approved = [
